@@ -1,0 +1,109 @@
+The Abiqua Collection
+Voice RAG System — FastAPI Routes Specification
+Spec version 1.0  ·  Component: API Layer  ·  Status: Draft
+Overview
+This document specifies the FastAPI route contracts for the Abiqua Collection Voice RAG system. All other components — the LlamaIndex orchestrator, MongoDB Atlas retrieval layer, and Rime TTS integration — implement against these contracts. Nothing downstream should deviate from the response envelope defined here without a version bump.
+
+The API layer has one primary responsibility: accept a natural language or serial-number query from the React frontend, coordinate retrieval and synthesis, and return a single structured response containing narration text, base64-encoded audio, image references, and source metadata.
+
+Demo noteAuthentication is intentionally omitted in this build. All endpoints are open. See the Production Callouts section for the recommended auth strategy at scale.
+Base Configuration
+FieldDescriptionFrameworkFastAPI (Python 3.11+)Base URL (dev)http://localhost:8000Base URL (prod)https://api.abiquacollection.com  [production callout]Content-Typeapplication/json (all routes)CORS originshttp://localhost:5173 (Vite dev). Locked to domain in production.AsyncAll route handlers are async. No blocking I/O in the request path.
+Route Definitions
+POST /query
+The primary route. Accepts a free-text query, runs the full RAG + TTS pipeline, and returns a single response envelope.
+
+Request body
+FieldDescriptionquerystring · required. Natural language or serial number. Min 2 chars, max 500 chars. Examples: 'tell me about the 1890 Safety Hammerless' or '123456'.voice_idstring · optional. Rime voice identifier. Defaults to server-side constant RIME_DEFAULT_VOICE if omitted.top_kinteger · optional. Number of Atlas chunks to retrieve. Defaults to 5. Max 20. Demo uses default; expose in UI only if needed.
+Example request
+POST /query
+Content-Type: application/json
+
+{
+  "query": "tell me about the New Departure Safety Hammerless",
+  "voice_id": "cartesia_default",
+  "top_k": 5
+}
+
+Response envelope — 200 OK
+FieldDescriptionnarration_textstring. The synthesized narration script sent to Rime. Displayed in the UI alongside the audio player.audio_b64string. Base64-encoded mp3. Frontend decodes and plays via Web Audio API or an <audio> element with a data URI.audio_mimestring. Always 'audio/mpeg' in this build. Included so the frontend does not hardcode the type.image_countinteger. Total number of images associated with the retrieved records. May be 0.image_refsarray of objects. See Image Refs schema below. Empty array if image_count is 0.source_metaobject. See Source Metadata schema below.query_echostring. The original query string, echoed back for UI display and debug logging.latency_msinteger. Server-side wall time in milliseconds from request receipt to response ready. Useful for demo callouts and performance storytelling.
+Image refs schema (per item in image_refs array)
+FieldDescriptionimage_idstring. MongoDB ObjectId of the image document.urlstring. Direct URL to the image asset. CDN-backed in production; local path acceptable for demo.captionstring or null. Short descriptive caption from the source record, if present.primaryboolean. True for the first/hero image of a record. Useful for thumbnail selection in the UI.
+Source metadata schema
+FieldDescriptionmodelstring. S&W model name from the retrieved record. e.g. 'New Departure Safety Hammerless'.serial_rangestring. Serial number range for the retrieved production era. e.g. '1–91,000'.year_startinteger or null. Production start year.year_endinteger or null. Production end year. Null if still in production or unknown.record_countinteger. Number of distinct records contributing to the narration.confidencefloat. LlamaIndex retrieval confidence score, 0.0–1.0. Informational; not shown in demo UI but included for logging.
+Example response
+{
+  "narration_text": "The New Departure Safety Hammerless entered production in
+    1887, representing a decisive shift toward consumer safety...
+    There are 4 images available to view.",
+  "audio_b64": "<base64-encoded mp3>",
+  "audio_mime": "audio/mpeg",
+  "image_count": 4,
+  "image_refs": [
+    { "image_id": "64a1f...", "url": "/images/64a1f.jpg",
+      "caption": "Right side profile, nickel finish", "primary": true },
+    ...
+  ],
+  "source_meta": {
+    "model": "New Departure Safety Hammerless",
+    "serial_range": "1–91,000",
+    "year_start": 1887,
+    "year_end": 1940,
+    "record_count": 3,
+    "confidence": 0.91
+  },
+  "query_echo": "tell me about the New Departure Safety Hammerless",
+  "latency_ms": 1847
+}
+
+GET /health
+Liveness check. Returns 200 if the API process is running. Does not test downstream dependencies (Atlas, Rime). For a full readiness check, see GET /ready.
+
+Response — 200 OK
+{ "status": "ok", "version": "1.0.0" }
+
+GET /ready
+Readiness check. Pings MongoDB Atlas and the Rime API. Returns 200 only if all dependencies respond. Returns 503 if any dependency is unreachable.
+
+Response — 200 OK
+{ "status": "ready", "atlas": "ok", "rime": "ok" }
+
+Response — 503 Service Unavailable
+{ "status": "degraded", "atlas": "ok", "rime": "unreachable" }
+
+GET /voices
+Returns the list of available Rime voice IDs. Proxied from the Rime API and cached server-side for 5 minutes. Allows the frontend to populate a voice selector without exposing the Rime API key to the client.
+
+Response — 200 OK
+{ "voices": [ { "id": "cartesia_default", "name": "Default", "preview_url": null }, ... ] }
+
+Error Handling
+All errors return a consistent envelope. The frontend should check the top-level 'ok' field rather than HTTP status alone, as some 200 responses from upstream services may mask partial failures.
+
+FieldDescription400Validation error. 'detail' contains field-level messages from Pydantic.422Unprocessable entity. Query passed validation but could not be understood (e.g. gibberish serial number with no Atlas match).429Rate limit exceeded. Demo: not enforced. Production: 60 req/min per IP. [production callout]500Unhandled server error. 'detail' contains a sanitized message. Full trace logs to server stderr only.503Upstream dependency (Atlas or Rime) unreachable. Retry after 5 seconds.
+Error envelope
+{ "ok": false, "status": 422, "error": "no_records_found",
+  "detail": "No matching records for serial number 999999." }
+
+Environment Variables
+All secrets and configuration are loaded from environment variables. No secrets in source code or committed .env files.
+
+FieldDescriptionMONGODB_URIFull Atlas connection string including credentials.MONGODB_DB_NAMEDatabase name. e.g. 'abiqua_collection'.MONGODB_COLLECTIONPrimary collection name. e.g. 'revolvers'.RIME_API_KEYRime API key. Injected at runtime; never logged.RIME_DEFAULT_VOICEFallback voice ID when request omits voice_id.LLAMAINDEX_EMBED_MODELEmbedding model identifier for LlamaIndex. e.g. 'text-embedding-3-small'.OPENAI_API_KEYRequired if using OpenAI embeddings. Omit if using a local embed model.LOG_LEVELPython logging level. Defaults to INFO. Set DEBUG for local dev.ALLOWED_ORIGINSComma-separated CORS origins. e.g. 'http://localhost:5173'.
+Production Callouts
+The following decisions were made deliberately for demo simplicity. Each represents a well-defined upgrade path for a production deployment.
+
+AuthDemo: no authentication. Production: API key in Authorization header (Bearer token) validated against a secrets store. Per-tenant keys allow usage attribution and rate limiting. OAuth2 client credentials flow for server-to-server integrations.
+Audio deliveryDemo: base64 mp3 in the JSON envelope. Simple, zero infrastructure. Production: POST /query returns a presigned S3/GCS URL with a 60-second TTL. Frontend GETs the audio from the CDN directly, offloading bandwidth from the API tier and enabling Range request seeking in the audio player.
+StreamingDemo: full pipeline completes before response is sent. Production: chunked transfer encoding streams partial narration text and audio frames as they are synthesized. Requires SSE or WebSocket for the audio path. Reduces perceived latency from ~2s to sub-500ms for first audio byte.
+Rate limitingDemo: no limits enforced. Production: 60 req/min per IP enforced at the API gateway layer (not in FastAPI itself). Burst allowance of 10 requests. 429 response includes Retry-After header.
+CachingDemo: no caching. Production: identical queries (same normalized query string + voice_id) are served from Redis with a 1-hour TTL. Cache key is SHA-256 of (normalized_query + voice_id). Audio stored separately from narration text to allow voice substitution without full re-synthesis.
+ObservabilityDemo: latency_ms in response envelope. Production: OpenTelemetry traces on all routes, structured JSON logging to stdout, Prometheus /metrics endpoint. Trace IDs propagated to Atlas and Rime calls for end-to-end latency attribution.
+Component Dependencies
+This spec defines the API layer contract only. The following specs govern the downstream components this layer depends on:
+
+• LlamaIndex Orchestrator Spec — embedding, retrieval, and prompt synthesis
+• MongoDB Atlas Spec — collection schema, vector index config, and query shape
+• Rime TTS Integration Spec — voice selection, synthesis parameters, and audio handling
+• React Frontend Spec — component structure, audio playback, and image display
+
+The Abiqua Collection Voice RAG System  ·  FastAPI Routes Spec v1.0  ·  Draft

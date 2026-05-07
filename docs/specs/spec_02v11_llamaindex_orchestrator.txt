@@ -1,0 +1,197 @@
+The Abiqua Collection
+Voice RAG System — LlamaIndex Orchestrator Specification
+Spec version 1.1  ·  Component: RAG Layer  ·  Status: Draft  ·  Updated: multi-collection rag_chunks architecture
+Overview
+This document specifies the LlamaIndex orchestration layer. It has been updated from v1.0 to reflect the confirmed MongoDB collection architecture: three purpose-built rag_chunks collections replace the single firearms collection originally specced. These collections contain pre-chunked, pre-embedded text derived from source documents, which means no migration script is required for existing data.
+
+The orchestrator owns five sequential stages: query classification, embedding, multi-collection retrieval, secondary lookup for display data, and LLM narration synthesis. Query type determines which collections are queried — serial number queries hit firearms_rag_chunks only; natural language queries hit all three collections and merge results.
+
+v1.0 changeThe migrate_search_text.py script specced in v1.0 is NOT required. The rag_chunks collections already contain pre-chunked text in the 'text' field. The migration script in the repo can be removed or repurposed as a utility for adding new documents.
+Confirmed Collection Architecture
+Three rag_chunks collections serve as the retrieval layer. Each contains chunked documents with the following confirmed field schema:
+
+FieldDescription_idMongoDB ObjectId.source_firearm_idReference to the parent document in the firearms collection. Used for secondary lookup to retrieve images and display metadata. Present in firearms_rag_chunks; may be null in the other two collections.chunk_idUnique identifier for this chunk within its source document.textThe chunk content. This is the text_key for LlamaIndex retrieval and the primary content passed to the narration prompt.embedding1536-dim float array. The vector used for Atlas Vector Search similarity matching.metadataObject containing: manufacturer_name, model, chunk_source_collection, chunk_index. chunk_source_collection identifies the origin collection even after results are merged.created_atAdministrative timestamp. Excluded from all retrieval context and prompt injection.
+Index statusAs of this spec revision, all three rag_chunks collections require new Vector Search indexes. Embeddings are present on all documents. Index creation is a UI-only operation in MongoDB Atlas — no re-embedding required. See the MongoDB Atlas Spec v1.1 for index creation instructions.
+Pipeline Overview
+The orchestrator executes five sequential stages on every query. Stage 3 now includes a secondary lookup stage to retrieve display data from the parent firearms collection.
+
+StageDescription1 — ClassificationDetermine query type: serial_number or natural_language. Determines which collections Stage 3 queries.2 — EmbeddingEncode query using text-embedding-3-small. Returns 1536-dim float vector.3a — RetrievalQuery one or three rag_chunks collections based on classification result. Returns top-k NodeWithScore objects.3b — Secondary lookupFor chunks from firearms_rag_chunks: fetch parent firearms documents by source_firearm_id to retrieve images, factory_letter, serial_number, year, finish. Natural language queries may return chunks from all three collections; only firearms chunks trigger a secondary lookup.4 — Prompt synthesisAssemble narration prompt from chunk text and secondary lookup data.5 — LLM narrationSend assembled prompt to Claude. Return narration_text and source_meta.
+Stage 1 — Query Classification
+Unchanged from v1.0. Lightweight regex + heuristic check, no LLM call.
+
+TypeDescriptionserial_number4–9 consecutive digits, optionally preceded by '#' or 'serial'. Queries firearms_rag_chunks only. Triggers source_firearm_id secondary lookup.natural_languageAll other queries. Queries all three rag_chunks collections. Merges results before prompt synthesis.
+Stage 2 — Embedding
+Unchanged from v1.0. text-embedding-3-small, 1536 dimensions, OpenAI-hosted. Query string embedded as-is.
+
+Stage 3a — Multi-Collection Retrieval
+Serial number queries — single collection
+When classification returns serial_number, the orchestrator queries firearms_rag_chunks only. A pre-filter on metadata.chunk_source_collection narrows candidates before vector similarity scoring.
+
+from llama_index.vector_stores.mongodb import MongoDBAtlasVectorSearch
+from llama_index.core import VectorStoreIndex, StorageContext
+
+def build_retriever(collection_name: str, index_name: str):
+    vector_store = MongoDBAtlasVectorSearch(
+        mongodb_client=mongo_client,
+        db_name=settings.MONGODB_DB_NAME,
+        collection_name=collection_name,
+        index_name=index_name,
+        embedding_key='embedding',
+        text_key='text',
+    )
+    index = VectorStoreIndex.from_vector_store(
+        vector_store, embed_model=embed_model
+    )
+    return index.as_retriever(similarity_top_k=top_k)
+
+# Instantiated once at startup, reused across requests
+retriever_firearms    = build_retriever(
+    settings.MONGODB_COLLECTION_FIREARMS_CHUNKS,
+    settings.MONGODB_INDEX_FIREARMS_CHUNKS
+)
+retriever_historical  = build_retriever(
+    settings.MONGODB_COLLECTION_HISTORICAL_CHUNKS,
+    settings.MONGODB_INDEX_HISTORICAL_CHUNKS
+)
+retriever_manufacturers = build_retriever(
+    settings.MONGODB_COLLECTION_MANUFACTURERS_CHUNKS,
+    settings.MONGODB_INDEX_MANUFACTURERS_CHUNKS
+)
+
+Natural language queries — all three collections
+For natural language queries, the orchestrator queries all three retrievers concurrently and merges results. The merged list is re-sorted by score descending and truncated to top_k before being passed to the prompt.
+
+import asyncio
+
+async def retrieve_all(query: str, top_k: int) -> list[NodeWithScore]:
+    results = await asyncio.gather(
+        asyncio.to_thread(retriever_firearms.retrieve, query),
+        asyncio.to_thread(retriever_historical.retrieve, query),
+        asyncio.to_thread(retriever_manufacturers.retrieve, query),
+    )
+    merged = [node for sublist in results for node in sublist]
+    merged.sort(key=lambda n: n.score, reverse=True)
+    return [n for n in merged if n.score >= SCORE_THRESHOLD][:top_k]
+
+Demo noteRunning three retrievers concurrently with asyncio.gather is a meaningful talking point. In a naive sequential implementation, three Atlas queries add latency linearly. Concurrent retrieval keeps the wall time close to a single query. This is the correct production pattern and costs nothing to implement correctly from the start.
+Score threshold
+SCORE_THRESHOLD = 0.70. Chunks below this similarity score are discarded even if they fall within top_k. Prevents low-confidence noise from entering the narration prompt. Applied after merging across all three collections.
+
+Stage 3b — Secondary Lookup
+After retrieval, the orchestrator identifies which chunks originate from firearms_rag_chunks by checking metadata.chunk_source_collection. For those chunks, it extracts the source_firearm_id values and performs a single batched lookup against the firearms collection to retrieve display data.
+
+def fetch_parent_firearms(source_ids: list[str]) -> dict[str, dict]:
+    """
+    Batch fetch parent firearms documents by source_firearm_id.
+    Returns a dict keyed by source_firearm_id for O(1) lookup.
+    """
+    from bson import ObjectId
+    object_ids = [ObjectId(sid) for sid in source_ids if sid]
+    if not object_ids:
+        return {}
+    docs = db['firearms'].find(
+        {'_id': {'$in': object_ids}},
+        {
+            'images': 1,
+            'factory_letter': 1,
+            'serial_number': 1,
+            'year': 1,
+            'estimated_year': 1,
+            'finish': 1,
+            'model': 1,
+            'series': 1,
+            'caliber': 1,
+            'short_url': 1,
+            'qr_code_base64': 0,   # ALWAYS excluded
+            'embedding': 0,         # ALWAYS excluded
+        }
+    )
+    return {str(doc['_id']): doc for doc in docs}
+
+The secondary lookup result feeds two downstream consumers: the image_refs assembly (image filenames resolved to URLs) and the source_meta response envelope (model, serial range, year, confidence).
+
+Natural language queriesNatural language queries may return chunks from historical_events_rag_chunks and manufacturers_rag_chunks that have no source_firearm_id or a null value. These chunks contribute text to the narration prompt but do not trigger a secondary lookup. image_refs is populated only from firearms parent documents.
+Stage 4 — Prompt Synthesis
+System prompt
+Unchanged from v1.0. The system prompt is static and does not need to know about the multi-collection architecture.
+
+SYSTEM_PROMPT = """
+You are the voice of The Abiqua Collection, a digital museum
+documenting the history and provenance of Smith and Wesson revolvers.
+
+Your narrations are authoritative, historically grounded, and written
+for an audience that appreciates precision. You speak like a knowledgeable
+collector and historian, not a salesperson.
+
+Rules:
+- Write in present tense where appropriate for historical description.
+- Never speculate beyond what the source records support.
+- If image references are present, close with exactly this sentence,
+  substituting N: 'There are N images available to view.'
+- If no images are present, omit the image sentence entirely.
+- Target length: 3 to 5 sentences. Never exceed 8 sentences.
+- Do not use bullet points, headers, or markdown formatting.
+- Do not begin with 'I' or 'The Abiqua Collection'.
+"""
+
+User prompt construction
+The user prompt now assembles context from two sources: chunk text from all retrieved collections, and structured display data from the secondary firearms lookup. Chunks are labeled by source so the LLM can weight firearms-specific content appropriately.
+
+def build_user_prompt(
+    query: str,
+    chunks: list[NodeWithScore],
+    parent_docs: dict[str, dict],
+    image_count: int,
+) -> str:
+    context_blocks = []
+    for chunk in chunks:
+        source = chunk.node.metadata.get('chunk_source_collection', 'unknown')
+        sid = chunk.node.metadata.get('source_firearm_id')
+        parent = parent_docs.get(str(sid), {}) if sid else {}
+        block = f'[Source: {source}]\n{chunk.node.text}'
+        if parent.get('factory_letter'):
+            block += '\n(Factory letter on file.)'
+        if parent.get('short_url'):
+            block += f'\nCollection URL: {parent["short_url"]}'
+        context_blocks.append(block)
+    context = '\n\n'.join(context_blocks)
+    image_instruction = (
+        f'Close with: There are {image_count} images available to view.'
+        if image_count > 0 else 'No images are available for this record.'
+    )
+    return f'Query: {query}\n\nSource records:\n{context}\n\n{image_instruction}'
+
+Stage 5 — LLM Narration
+Unchanged from v1.0. claude-haiku-4-5-20251001, max_tokens 400, temperature 0.3.
+
+OrchestratorResult — Updated
+The dataclass is extended with query_type to support the FastAPI response envelope and frontend display.
+
+@dataclass
+class OrchestratorResult:
+    narration_text:  str
+    image_count:     int
+    image_refs:      list[dict]
+    source_meta:     dict
+    confidence:      float
+    query_type:      str    # 'serial_number' | 'natural_language'
+    collections_hit: list[str]  # which collections contributed chunks
+
+collections_hit is informational — it surfaces which collections contributed to the narration. Useful for debugging and for the latency_ms production callout on camera: 'this natural language query hit all three collections concurrently in 1.8 seconds total.'
+
+Environment Variables — Updated
+VariableDescriptionMONGODB_DB_NAMEDatabase name.MONGODB_COLLECTION_FIREARMSSet to: firearms (parent collection for secondary lookup)MONGODB_COLLECTION_FIREARMS_CHUNKSSet to: firearms_rag_chunksMONGODB_COLLECTION_HISTORICAL_CHUNKSSet to: historical_events_rag_chunksMONGODB_COLLECTION_MANUFACTURERS_CHUNKSSet to: manufacturers_rag_chunksMONGODB_INDEX_FIREARMS_CHUNKSVector Search index name on firearms_rag_chunksMONGODB_INDEX_HISTORICAL_CHUNKSVector Search index name on historical_events_rag_chunksMONGODB_INDEX_MANUFACTURERS_CHUNKSVector Search index name on manufacturers_rag_chunksMONGODB_EMBEDDING_FIELDSet to: embedding (consistent across all collections)OPENAI_API_KEYFor text-embedding-3-small.ANTHROPIC_API_KEYFor claude-haiku-4-5 narration.LLAMAINDEX_EMBED_MODELSet to: text-embedding-3-smallSCORE_THRESHOLDOptional. Float 0.0–1.0. Defaults to 0.70 in code.
+Production Callouts
+StreamingDemo: run_query() returns complete OrchestratorResult after all stages complete. Production: stream Stage 5 LLM tokens directly to Rime streaming endpoint. First audio byte latency drops from ~2s to under 500ms.
+RerankingDemo: Atlas similarity score is the only ranking signal after merge. Production: add a cross-encoder reranker as Stage 3c between merge and prompt synthesis. Particularly valuable for natural language queries where chunks from three collections need intelligent ranking rather than pure vector similarity.
+Collection weightingDemo: all three collections contribute equally to the merged result. Production: weight firearms_rag_chunks results higher for provenance queries — a chunk about the specific revolver should outrank general historical context of the same similarity score. Implement as a score multiplier applied before sort.
+Retriever cachingDemo: retrievers instantiated at startup, reused across requests. Production: add query-level result caching in Redis keyed by (normalized_query + collection_set). Repeat queries for popular models return immediately without Atlas round trips.
+Component Dependencies
+• FastAPI Routes Spec v1.1 — updated env vars, collections_hit field in response
+• MongoDB Atlas Spec v1.1 — collection schemas, Vector Search index creation
+• Rime TTS Integration Spec v1.0 — unchanged
+• React Frontend Spec v1.0 — unchanged
+
+Python packages
+PackageDescriptionllama-index-coreCore orchestration primitivesllama-index-vector-stores-mongodbMongoDBAtlasVectorSearch integrationllama-index-embeddings-openaiOpenAIEmbedding classanthropicDirect SDK for Stage 5 narrationpymongoAtlas client for secondary lookupopenaiRequired by LlamaIndex embedding integration
+The Abiqua Collection Voice RAG System  ·  LlamaIndex Orchestrator Spec v1.1  ·  Draft

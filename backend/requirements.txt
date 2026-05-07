@@ -1,0 +1,1 @@
+# Generated with `uv pip compile` for pip compatibility.

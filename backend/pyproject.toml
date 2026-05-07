@@ -1,0 +1,25 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "abiqua-voice-rag-backend"
+version = "0.1.0"
+description = "Backend for Abiqua Collection Voice RAG"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic",
+    "fastapi",
+    "llama-index-core",
+    "llama-index-embeddings-openai",
+    "llama-index-vector-stores-mongodb",
+    "openai",
+    "pydantic-settings",
+    "pymongo",
+    "uvicorn[standard]",
+]
+
+[tool.uv]
+package = false
+dev-dependencies = []
