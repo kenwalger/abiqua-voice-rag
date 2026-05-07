@@ -1,0 +1,188 @@
+The Abiqua Collection
+Voice RAG System — Rime TTS Integration Specification
+Spec version 1.0  ·  Component: Voice Layer  ·  Status: Draft
+Overview
+This document specifies the Rime TTS integration layer — the final stage of the pipeline responsible for converting the narration script produced by the LlamaIndex orchestrator into synthesized audio returned to the React frontend. It covers the confirmed API endpoint, required and optional parameters, voice and model selection rationale, audio encoding, error handling, and the full Python integration function.
+
+Parameter names and endpoint details in this spec are verified against Rime's live documentation as of May 2026. The base URL defaults to https://users-west.rime.ai and is configurable via the RIME_BASE_URL environment variable — set it to https://users.rime.ai or any other regional endpoint Rime provides. If Rime updates their API, check docs.rime.ai for the current reference before running.
+
+Voice selectionThis spec defaults to speaker: 'colby' with modelId: 'arcana'. Colby is a measured, authoritative male voice well-suited to narration and historical content. Before filming the demo, browse voices at app.rime.ai and substitute a preferred speaker if desired. The speaker is configurable via the RIME_DEFAULT_VOICE environment variable — no code change required.
+Rime API Reference
+Endpoint
+POST {RIME_BASE_URL}/v1/rime-tts
+
+RIME_BASE_URL defaults to https://users-west.rime.ai. Override via environment variable to switch regions. See Environment Variables section.
+
+Authentication
+Bearer token in the Authorization header. The API key is never logged, never returned to the client, and never included in any response envelope field.
+
+Authorization: Bearer {RIME_API_KEY}
+
+Required request parameters
+ParameterDescriptiontextstring. The narration script from the LlamaIndex orchestrator. Plain text only — no markdown, no HTML. The orchestrator system prompt enforces this, but strip any residual formatting characters before sending as a safety measure.speakerstring. The voice ID. Default: 'colby'. Configurable via RIME_DEFAULT_VOICE env var. Can be overridden per-request via the voice_id field in the FastAPI request body.modelIdstring. The synthesis model. Set to 'arcana' for this build. See Model Selection below for rationale.
+Optional request parameters
+ParameterDescriptionspeedAlphafloat. Speech rate multiplier. 1.0 = default speed. Values below 1.0 produce faster speech; above 1.0 slower. Default for this build: 0.95. Slightly slower than default suits deliberate historical narration and gives the listener time to absorb proper nouns like 'New Departure Safety Hammerless'.reduceLatencyboolean. When true, disables text normalization pre-processing to reduce synthesis startup time. Default: false for this build. Normalization correctly handles serial numbers, years, and caliber designations (e.g. '.32 S&W' spoken correctly). Disabling it risks mispronunciation of these domain-specific terms.samplingRateinteger. Audio sample rate in Hz. Valid values: 8000, 16000, 22050, 24000, 32000, 44100, 48000. Default for this build: 22050. Sufficient quality for narration playback in a browser. Higher rates increase file size with diminishing perceptual returns for speech.
+Request headers
+HeaderDescriptionAuthorizationBearer {RIME_API_KEY}Content-Typeapplication/jsonAcceptaudio/mp3
+Model Selection Rationale
+ModelDescriptionarcanaSELECTED. Rime's most expressive model. Designed for nuanced, natural-sounding narration. Handles proper nouns, pauses, and emphasis well. Higher latency than mistv3 (~200-400ms additional synthesis time) — acceptable for a non-streaming demo where the full response is assembled before playback begins.mistv3Rime's fastest model. Optimized for real-time conversational latency (~70ms time-to-first-audio). Correct choice for the streaming production upgrade path. For this demo, the latency advantage is irrelevant since audio is not streamed — the full mp3 is returned in the JSON envelope after synthesis completes.
+Production noteThe model selection decision maps directly to the streaming callout in the FastAPI Routes Spec. In production with streaming enabled, switch modelId from 'arcana' to 'mistv3' and implement chunked audio delivery. The switch requires one parameter change — no architectural changes to the integration function.
+Integration Function
+The TTS integration is implemented as a single async function called by the FastAPI route handler after the orchestrator returns a narration script. It accepts the narration text and an optional speaker override, calls the Rime API, encodes the response as base64, and returns a RimeResult dataclass.
+
+RimeResult dataclass
+from dataclasses import dataclass
+
+@dataclass
+class RimeResult:
+    audio_b64: str        # Base64-encoded mp3
+    audio_mime: str       # Always 'audio/mpeg'
+    speaker: str          # Voice ID actually used
+    model_id: str         # Model ID actually used
+    char_count: int       # Length of narration_text sent to Rime
+
+Full integration function
+import asyncio, base64, json, os
+import urllib.request, urllib.error
+from dataclasses import dataclass
+import re
+
+RIME_BASE_URL  = os.environ.get('RIME_BASE_URL',
+                               'https://users-west.rime.ai')
+RIME_API_URL   = f'{RIME_BASE_URL}/v1/rime-tts'
+RIME_VOICES_URL = f'{RIME_BASE_URL}/v1/voices'
+RIME_API_KEY   = os.environ['RIME_API_KEY']
+DEFAULT_VOICE  = os.environ.get('RIME_DEFAULT_VOICE', 'colby')
+DEFAULT_MODEL  = 'arcana'
+SPEED_ALPHA    = 0.95
+SAMPLING_RATE  = 22050
+
+def _clean_narration(text: str) -> str:
+    """Strip residual markdown before sending to Rime."""
+    text = re.sub(r'[_*#`]', '', text)
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    return text.strip()
+
+async def synthesize(
+    narration_text: str,
+    speaker: str | None = None,
+) -> RimeResult:
+    speaker = speaker or DEFAULT_VOICE
+    text    = _clean_narration(narration_text)
+
+    payload = json.dumps({
+        'text':         text,
+        'speaker':      speaker,
+        'modelId':      DEFAULT_MODEL,
+        'speedAlpha':   SPEED_ALPHA,
+        'samplingRate': SAMPLING_RATE,
+    }).encode('utf-8')
+
+    headers = {
+        'Accept':        'audio/mp3',
+        'Authorization': f'Bearer {RIME_API_KEY}',
+        'Content-Type':  'application/json',
+    }
+
+    req = urllib.request.Request(
+        RIME_API_URL,
+        data=payload,
+        headers=headers,
+        method='POST'
+    )
+
+    try:
+        loop = asyncio.get_event_loop()
+        def _do_request():
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return resp.read()
+        audio_bytes = await loop.run_in_executor(None, _do_request)
+    except urllib.error.HTTPError as e:
+        body = e.read().decode('utf-8', errors='replace')
+        raise RuntimeError(f'rime_api_error:{e.code}:{body}')
+    except urllib.error.URLError as e:
+        raise RuntimeError(f'rime_unreachable:{e.reason}')
+
+    return RimeResult(
+        audio_b64  = base64.b64encode(audio_bytes).decode('utf-8'),
+        audio_mime = 'audio/mpeg',
+        speaker    = speaker,
+        model_id   = DEFAULT_MODEL,
+        char_count = len(text),
+    )
+
+Async noteThe urllib call is synchronous I/O. It is wrapped in run_in_executor() so it does not block the FastAPI async event loop. In production, replace with httpx.AsyncClient for a cleaner async-native HTTP client. The run_in_executor pattern is correct for the demo and requires no additional dependencies.
+Text Preparation
+The narration text produced by the LlamaIndex orchestrator is already plain prose — the system prompt forbids markdown, headers, and bullet points. However, two preparation steps must still be applied before sending to Rime:
+
+1. Markdown strip
+The _clean_narration() function strips any residual markdown characters. This is a safety measure in case the LLM occasionally produces light formatting despite the system prompt instruction. It does not alter plain prose.
+
+2. Domain term awareness
+Several terms in firearms provenance narration are prone to TTS mispronunciation. The reduceLatency parameter is set to false specifically to keep Rime's text normalization active, which handles most of these correctly. Known terms to verify in testing:
+
+TermDescription.32 S&WShould be spoken as 'thirty-two Smith and Wesson'. Verify normalization handles the period prefix correctly.S&WShould expand to 'Smith and Wesson'. Verify the ampersand is not spoken as 'and and'.New DepartureTwo-word proper noun. Should be spoken naturally with no unusual stress.Safety HammerlessCompound modifier. Should flow without a pause between words.serial number 143960Six-digit number. Should be spoken as individual digits or as 'one forty-three thousand nine hundred sixty' depending on normalization. Test and adjust speedAlpha if pacing feels rushed on long numerals.nickel / bluedFinish terms. Both common English words — normalization should handle correctly.
+If any term is mispronounced, Rime supports custom pronunciation via their pronunciation API. This is a production-grade feature worth demonstrating — noting it during the demo as 'one line of configuration per term, no model retraining' is a strong talking point.
+
+Demo tipRecord the narration for serial 143960 early in development. Listen specifically to how '.32 S&W', 'New Departure', and 'Safety Hammerless' are spoken. These are the highest-risk terms for the demo audience noticing a mispronunciation. Adjust speedAlpha between 0.90 and 1.00 to find the most authoritative pace.
+Audio Handling
+Base64 encoding
+The raw mp3 bytes from Rime are base64-encoded and returned in the JSON response envelope as audio_b64. The React frontend decodes this and plays it via an HTML audio element using a data URI.
+
+# FastAPI assembles the final response like this:
+return {
+    'narration_text': orch_result.narration_text,
+    'audio_b64':      rime_result.audio_b64,
+    'audio_mime':     rime_result.audio_mime,
+    'image_count':    orch_result.image_count,
+    'image_refs':     orch_result.image_refs,
+    'source_meta':    orch_result.source_meta,
+    'query_echo':     query,
+    'latency_ms':     int((time.time() - t0) * 1000),
+}
+
+Typical audio file sizes
+For narrations of 3 to 5 sentences (the target length from the system prompt), expected file sizes at 22050 Hz sampling rate:
+
+Narration lengthDescription3 sentences (~150 chars)~40–60 KB mp3 · ~55–80 KB base645 sentences (~300 chars)~80–120 KB mp3 · ~110–160 KB base648 sentences (~500 chars)~130–200 KB mp3 · ~175–270 KB base64
+These sizes are well within JSON response payload norms for a demo. The 400-token max_tokens cap on the LLM narration stage effectively enforces the upper bound.
+
+Production noteAt scale, base64 in JSON is inefficient — it inflates payload size by ~33% and prevents Range request seeking in the audio player. Production path: return a presigned CDN URL with a 60-second TTL instead of base64. The Rime result is written to object storage, the URL is returned to the client, and the client fetches audio directly from the CDN. This also enables the React player to display a seek bar, which base64 data URIs do not support.
+Error Handling
+ErrorDescriptionRuntimeError: rime_api_error:401:...Invalid or expired API key. Check RIME_API_KEY env var. FastAPI maps to 503.RuntimeError: rime_api_error:400:...Malformed request — most likely empty or excessively long text. The LLM max_tokens cap prevents the latter. Check narration_text is not empty. FastAPI maps to 500 with sanitized detail.RuntimeError: rime_api_error:429:...Rime rate limit exceeded. FastAPI maps to 503 with Retry-After header. Unlikely in demo usage.RuntimeError: rime_unreachable:...Network timeout or DNS failure. Timeout is set to 30 seconds — Rime synthesis of 5 sentences typically completes in 1–3 seconds. A 30-second timeout indicates a genuine connectivity issue. FastAPI maps to 503.
+Environment Variables
+VariableDescriptionRIME_BASE_URLOptional. Rime regional base URL. Defaults to 'https://users-west.rime.ai'. Set to 'https://users.rime.ai' for the default global endpoint or another regional URL as needed. Applied to both the TTS and voices endpoints.RIME_API_KEYRequired. Rime API key from app.rime.ai/tokens. Never logged or returned to client.RIME_DEFAULT_VOICEOptional. Speaker ID to use when request does not specify voice_id. Defaults to 'colby' if not set.
+GET /voices — Proxied Voice List
+The FastAPI routes spec includes a GET /voices endpoint that proxies Rime's voice list to the frontend. This allows a voice selector UI in React without exposing the Rime API key to the browser. The implementation is straightforward:
+
+async def get_voices() -> dict:
+    req = urllib.request.Request(
+        RIME_VOICES_URL,
+        headers={'Authorization': f'Bearer {RIME_API_KEY}'},
+        method='GET'
+    )
+    loop = asyncio.get_event_loop()
+    def _fetch():
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read())
+    voices_raw = await loop.run_in_executor(None, _fetch)
+    return {'voices': voices_raw}
+
+Cache this response server-side for 5 minutes — the voice list does not change frequently and the round-trip adds unnecessary latency to the UI load.
+
+Production Callouts
+Streaming synthesisDemo: full mp3 returned after synthesis completes. Production: switch modelId to 'mistv3' and use Rime's streaming endpoint, which delivers audio chunks as they are generated (~70ms time-to-first-audio). The React player begins playback immediately on first chunk receipt. Requires SSE or WebSocket transport in FastAPI and a chunked audio player in React.
+Custom pronunciationDemo: default Rime normalization handles domain terms. Production: register custom pronunciations for S&W-specific terms via Rime's pronunciation API. One API call per term, pronunciation holds across all voices and model versions. No model retraining. This is a material differentiator if deploying as a multi-tenant platform where other collections have their own terminology.
+Voice cloningRime supports enterprise voice cloning. A production version of The Abiqua Collection could use a cloned voice — the curator's own voice, for instance — to narrate provenance records. This creates a strong brand identity and is a compelling product story for theabiquacollection.com as a platform.
+HTTP clientDemo: urllib.request wrapped in run_in_executor. Production: replace with httpx.AsyncClient for async-native HTTP, connection pooling, automatic retry with exponential backoff, and cleaner timeout handling. Add pip install httpx to requirements.
+Audio CDNDemo: base64 mp3 in JSON envelope. Production: write synthesized audio to S3 or GCS, return a presigned URL with a 60-second TTL. Enables seek bar in the React audio player, offloads bandwidth from the API tier, and allows cache hits for repeat queries of the same narration.
+Python Dependencies
+The Rime integration uses only Python standard library modules for the demo build — no additional packages required beyond what the rest of the stack already installs.
+
+ModuleDescriptionurllib.requestStandard library. HTTP client for Rime API calls.base64Standard library. Encodes audio bytes for JSON transport.asyncioStandard library. run_in_executor wraps the synchronous urllib call.jsonStandard library. Request payload serialization.reStandard library. Markdown stripping in _clean_narration().dataclassesStandard library. RimeResult dataclass.
+Component Dependencies
+• LlamaIndex Orchestrator Spec — provides narration_text input to synthesize()
+• FastAPI Routes Spec — consumes RimeResult.audio_b64 and RimeResult.audio_mime for the response envelope; provides speaker override from request body
+• React Frontend Spec — decodes audio_b64 and renders audio player
+
+The Abiqua Collection Voice RAG System  ·  Rime TTS Integration Spec v1.0  ·  Draft
