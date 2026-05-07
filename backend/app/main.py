@@ -8,9 +8,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from app.orchestrator import run_query
+from app.rime import get_voices, synthesize
 from app.settings import get_settings
 
 settings = get_settings()
+VOICES_CACHE: dict[str, Any] = {"expires_at": 0.0, "data": {"voices": []}}
+VOICES_CACHE_TTL_SECONDS = 300
 
 
 class QueryRequest(BaseModel):
@@ -56,14 +59,8 @@ class QueryResponse(BaseModel):
     latency_ms: int
 
 
-class Voice(BaseModel):
-    id: str
-    name: str
-    preview_url: str | None
-
-
 class VoicesResponse(BaseModel):
-    voices: list[Voice]
+    voices: list[dict[str, Any]]
 
 
 class ApiError(BaseModel):
@@ -122,10 +119,6 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 
-async def synthesize_audio(_text: str, _voice_id: str) -> dict[str, Any]:
-    return {"audio_b64": "RIME_PLACEHOLDER_AUDIO_B64"}
-
-
 async def ping_atlas() -> str:
     return "ok"
 
@@ -137,17 +130,25 @@ async def ping_rime() -> str:
 @app.post("/query", response_model=QueryResponse)
 async def query_endpoint(payload: QueryRequest):
     start_time = time.time()
-    voice_id = payload.voice_id or settings.RIME_DEFAULT_VOICE
 
     rag_result = await run_query(payload.query, payload.top_k)
-    tts_result = await synthesize_audio(rag_result.narration_text, voice_id)
+    try:
+        tts_result = await synthesize(rag_result.narration_text, payload.voice_id)
+    except RuntimeError as exc:
+        message = str(exc)
+        if message.startswith("rime_api_error:") or message.startswith("rime_unreachable:"):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=message,
+            ) from exc
+        raise
 
     latency_ms = int((time.time() - start_time) * 1000)
 
     return QueryResponse(
         narration_text=rag_result.narration_text,
-        audio_b64=tts_result["audio_b64"],
-        audio_mime="audio/mpeg",
+        audio_b64=tts_result.audio_b64,
+        audio_mime=tts_result.audio_mime,
         image_count=rag_result.image_count,
         image_refs=rag_result.image_refs,
         source_meta=rag_result.source_meta,
@@ -182,5 +183,22 @@ async def ready() -> JSONResponse:
 
 @app.get("/voices", response_model=VoicesResponse)
 async def voices() -> VoicesResponse:
-    return VoicesResponse(voices=[])
+    now = time.time()
+    if VOICES_CACHE["expires_at"] > now:
+        return VoicesResponse(voices=VOICES_CACHE["data"]["voices"])
+
+    try:
+        voices_data = await get_voices()
+    except RuntimeError as exc:
+        message = str(exc)
+        if message.startswith("rime_api_error:") or message.startswith("rime_unreachable:"):
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=message,
+            ) from exc
+        raise
+
+    VOICES_CACHE["data"] = voices_data
+    VOICES_CACHE["expires_at"] = now + VOICES_CACHE_TTL_SECONDS
+    return VoicesResponse(voices=voices_data.get("voices", []))
 

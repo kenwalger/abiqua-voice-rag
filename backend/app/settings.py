@@ -23,7 +23,8 @@ class Settings(BaseSettings):
     MONGODB_INDEX_MANUFACTURERS_CHUNKS: str
     MONGODB_EMBEDDING_FIELD: str = "embedding"
     RIME_API_KEY: str
-    RIME_DEFAULT_VOICE: str = "cartesia_default"
+    RIME_BASE_URL: str = "https://users-west.rime.ai"
+    RIME_DEFAULT_VOICE: str = "colby"
     LLAMAINDEX_EMBED_MODEL: str = "text-embedding-3-small"
     OPENAI_API_KEY: str | None = None
     ANTHROPIC_API_KEY: str

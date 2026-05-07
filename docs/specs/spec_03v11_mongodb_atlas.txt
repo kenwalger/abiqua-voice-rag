@@ -1,0 +1,131 @@
+The Abiqua Collection
+Voice RAG System — MongoDB Atlas Data Layer Specification
+Spec version 1.1  ·  Component: Data Layer  ·  Status: Draft  ·  Updated: confirmed rag_chunks schema + index rebuild
+Overview
+This document specifies the MongoDB Atlas data layer, updated to reflect the confirmed collection architecture. Four collections are relevant to this system: three rag_chunks retrieval collections and the parent firearms collection used for secondary display data lookup. The rag_chunks collections are pre-chunked and pre-embedded. No migration or re-embedding is required for existing documents.
+
+The primary change from v1.0: Atlas Vector Search indexes on all three rag_chunks collections were lost and must be rebuilt. This is a UI-only operation — all embedding vectors are intact on the documents. Index creation instructions are in this spec.
+
+Immediate action requiredCreate Vector Search indexes on all three rag_chunks collections before running the system. Embeddings are present. No data changes needed. See the Vector Search Index Creation section.
+Collection Inventory
+CollectionDescriptionfirearmsParent collection. Source of truth for display data: images, factory_letter, serial_number, year, finish, model, series, caliber, short_url. Queried only in Stage 3b secondary lookup — never directly by the vector retriever.firearms_rag_chunksChunked text from firearms records. Primary retrieval collection for both serial number and natural language queries. Contains source_firearm_id linking back to the firearms parent document.historical_events_rag_chunksChunked text about historical events relevant to the collection era. Queried for natural language queries only. Provides period context to the narration.manufacturers_rag_chunksChunked text about manufacturers, model lineage, and design history. Queried for natural language queries only. Provides model context to the narration.
+Confirmed rag_chunks Document Schema
+Confirmed via findOne() on firearms_rag_chunks. This schema applies consistently across all three rag_chunks collections.
+
+FieldType / ExampleRole_idObjectIdMongoDB document identifier.source_firearm_idstring (ObjectId ref) | nullReference to parent firearms document. Present in firearms_rag_chunks. May be null in historical and manufacturers chunks.chunk_idstringUnique chunk identifier within the source document.textstringChunk content. text_key for LlamaIndex. Passed directly to narration prompt.embeddingarray[float] · 1536 dimsVector for Atlas Vector Search. embedding_key for LlamaIndex.metadataobjectContains: manufacturer_name, model, chunk_source_collection, chunk_index. chunk_source_collection identifies origin after multi-collection merge.created_atISO 8601 stringAdministrative. Excluded from all retrieval projections and prompt context.
+text_key confirmedThe field containing chunk content is 'text' — not 'search_text' as specced in v1.0. The v1.0 migration script is not needed. Update any Cursor-generated code that references 'search_text' to use 'text'.
+Confirmed firearms Document Schema
+Relevant fields for secondary lookup only. Full schema documented in v1.0. Key display fields:
+
+FieldType / ExampleRoleimagesarray[string]Image filenames. Resolved to URLs via IMAGE_BASE_URL. Primary source of image_refs in response envelope.factory_letterbooleanHigh-value provenance signal. Injected into prompt context when true.serial_numberstringStored as string to preserve leading zeros.yearintegerProduction year.estimated_yearbooleanIf true, year is approximate.finishstringe.g. 'nickel', 'blued'.modelstringe.g. '.32 New Departure'.seriesstringe.g. '2nd Model'.caliberstringe.g. '.32 S&W'.short_urlstringPre-built short URL. Optionally injected into prompt as collection reference.qr_code_base64stringALWAYS EXCLUDED. Large base64 blob. Never included in any projection.embeddingarray[float]ALWAYS EXCLUDED. Parent document embedding, not used by rag_chunks retriever.
+Vector Search Index Creation
+All three rag_chunks collections need new Vector Search indexes. Follow these steps in the MongoDB Atlas UI for each collection. The process is identical for all three — only the collection name and index name differ.
+
+Steps (repeat for each collection)
+1. In Atlas, navigate to your cluster and select the database.
+2. Click Atlas Search in the left sidebar.
+3. Click Create Search Index.
+4. Select JSON Editor.
+5. Select the target collection from the dropdown.
+6. Paste the index definition below.
+7. Name the index as specified in the table below.
+8. Click Next and then Create Search Index.
+Index creation takes 1–3 minutes per collection. The system cannot run until all three indexes are active.
+
+Index definition (same for all three collections)
+{
+  "fields": [
+    {
+      "type": "vector",
+      "path": "embedding",
+      "numDimensions": 1536,
+      "similarity": "cosine"
+    },
+    {
+      "type": "filter",
+      "path": "metadata.chunk_source_collection"
+    }
+  ]
+}
+
+The filter field on metadata.chunk_source_collection enables pre-filtering within a collection by chunk origin — useful for future refinement without additional index changes.
+
+Index names per collection
+CollectionDescriptionfirearms_rag_chunksSuggested index name: firearms_rag_chunks_idxhistorical_events_rag_chunksSuggested index name: historical_events_rag_chunks_idxmanufacturers_rag_chunksSuggested index name: manufacturers_rag_chunks_idx
+These names go directly into the environment variables MONGODB_INDEX_FIREARMS_CHUNKS, MONGODB_INDEX_HISTORICAL_CHUNKS, and MONGODB_INDEX_MANUFACTURERS_CHUNKS. Use whatever names you set in Atlas — the env vars make them configurable.
+
+Verify index creation
+// In mongosh, after indexes are active:
+db.firearms_rag_chunks.getSearchIndexes()
+db.historical_events_rag_chunks.getSearchIndexes()
+db.manufacturers_rag_chunks.getSearchIndexes()
+// Each should show type: 'vectorSearch', numDimensions: 1536
+
+Image URL Resolution
+Unchanged from v1.0. Image filenames from the firearms parent document are resolved to full URLs using IMAGE_BASE_URL. The first image is designated primary=true.
+
+IMAGE_BASE_URL = os.environ.get('IMAGE_BASE_URL',
+                               'https://theabiquacollection.com/images')
+
+def resolve_image_refs(images: list[str]) -> list[dict]:
+    return [
+        {
+            'image_id': filename.split('.')[0],
+            'url': f'{IMAGE_BASE_URL}/{filename}',
+            'caption': None,
+            'primary': i == 0
+        }
+        for i, filename in enumerate(images)
+    ]
+
+Atlas Aggregation Reference
+The LlamaIndex integration constructs the aggregation pipeline internally. This is the equivalent raw pipeline for reference and debugging. Note the exclusion list — qr_code_base64 and embedding are always projected out.
+
+[
+  {
+    '$vectorSearch': {
+      'index': '<index_name>',
+      'path': 'embedding',
+      'queryVector': [/* 1536-dim float array */],
+      'numCandidates': 100,
+      'limit': 5
+    }
+  },
+  {
+    '$project': {
+      'embedding': 0,
+      'created_at': 0,
+      'score': { '$meta': 'vectorSearchScore' }
+    }
+  }
+]
+
+The secondary firearms lookup uses a standard find() with an explicit exclusion projection — not a vector search:
+
+db.firearms.find(
+  { '_id': { '$in': [ObjectId(...), ...] } },
+  { 'qr_code_base64': 0, 'embedding': 0,
+    'embedding_updated_at': 0, 'sku': 0,
+    'short_code': 0, 'display_card_printed': 0,
+    'sku_card_printed': 0, 'box_sticker_printed': 0,
+    'appraised_value': 0, 'price_paid': 0,
+    'created_at': 0, 'updated_at': 0 }
+)
+
+Updated Environment Variables
+VariableDescriptionMONGODB_URIFull Atlas connection string.MONGODB_DB_NAMEDatabase name.MONGODB_COLLECTION_FIREARMSSet to: firearmsMONGODB_COLLECTION_FIREARMS_CHUNKSSet to: firearms_rag_chunksMONGODB_COLLECTION_HISTORICAL_CHUNKSSet to: historical_events_rag_chunksMONGODB_COLLECTION_MANUFACTURERS_CHUNKSSet to: manufacturers_rag_chunksMONGODB_INDEX_FIREARMS_CHUNKSVector Search index name on firearms_rag_chunks. Set after creating index in Atlas UI.MONGODB_INDEX_HISTORICAL_CHUNKSVector Search index name on historical_events_rag_chunks.MONGODB_INDEX_MANUFACTURERS_CHUNKSVector Search index name on manufacturers_rag_chunks.MONGODB_EMBEDDING_FIELDSet to: embedding (consistent across all collections)IMAGE_BASE_URLBase URL for image filename resolution.
+New Document Requirements
+New documents added to the rag_chunks collections must include text, embedding, embedding_updated_at, source_firearm_id (if applicable), and metadata fields at insert time. The embedding must be generated from the text field using the same model as the existing index (text-embedding-3-small, 1536 dims).
+
+New documents added to the firearms parent collection do not need to be directly embedded for the voice RAG system — the rag_chunks collections serve that purpose. However, corresponding rag_chunk documents should be created and embedded when a new firearms record is added.
+
+Production Callouts
+Index filter fieldsThe filter on metadata.chunk_source_collection is already included in the index definition above. This enables future pre-filtering without index changes — for example, routing queries to only 'firearms_notes' chunks within the firearms_rag_chunks collection.
+Re-embedding strategyIf the chunking strategy changes, existing embeddings become stale. Track embedding model version in a config document and compare against embedding_updated_at on each chunk. A background worker re-embeds stale documents without downtime.
+Multi-database retrievalThe current spec queries one database. A production platform serving multiple collections or curators could maintain separate databases per curator with identical schema, routing queries by subdomain or API key tenant ID.
+Component Dependencies
+• LlamaIndex Orchestrator Spec v1.1 — consumes collection names, field names, and index names from this spec
+• FastAPI Routes Spec — updated env vars in .env.example
+• React Frontend Spec v1.0 — unchanged
+
+The Abiqua Collection Voice RAG System  ·  MongoDB Atlas Data Layer Spec v1.1  ·  Draft

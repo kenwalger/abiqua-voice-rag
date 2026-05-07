@@ -270,11 +270,16 @@ model that generated your existing vectors.
 
 ## Demo query
 
-Serial number `143960` is the recommended starting point — a nickel .32 New
-Departure 2nd Model shipped in March 1905 to the China and Japan Trading Co,
-NYC, with a factory letter and four archival images. It exercises the full
-pipeline including factory letter provenance and the image gallery.
+Serial number `143960` exercises the full pipeline end to end:
 
+- **Record:** .32 New Departure 2nd Model, 1905, nickel finish
+- **Retrieval path:** `firearms_direct_lookup` (deterministic serial match)
+- **Audio:** ~875 KB synthesized mp3, Rime Arcana model, voice: colby
+- **Images:** 4 archival images
+- **Pipeline latency:** ~3.8s (sync retrieval, pre-streaming)
+
+Natural language queries hit all three rag_chunks collections
+concurrently and merge results before narration synthesis.
 ---
 
 ## Regional endpoint
