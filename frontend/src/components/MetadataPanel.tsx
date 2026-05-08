@@ -24,14 +24,13 @@ export function MetadataPanel({
     record_count,
     confidence,
     record_url,
-    short_url,
   } =
     source_meta;
   const yearShipped = year_start ?? year_end;
   const yearShippedDisplay = yearShipped === null || yearShipped === undefined ? "?" : String(yearShipped);
   const confidencePct = `${Math.round(confidence * 100)}%`;
   const latencySec = `${(latency_ms / 1000).toFixed(1)}s`;
-  const fullRecordUrl = (record_url ?? short_url ?? "").trim();
+  const fullRecordUrl = (record_url ?? "").trim();
 
   const row = (label: string, value: ReactNode) => (
     <div className="grid grid-cols-[1fr_2fr] gap-2 py-2 border-b border-[#593F26]/15 last:border-0">

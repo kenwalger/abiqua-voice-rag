@@ -50,18 +50,12 @@ def apply_llama_mongodb_objectid_patch() -> None:
                 nid = getattr(node, "id_", None)
                 if nid is not None and not isinstance(nid, str):
                     node.id_ = str(nid)
-            except Exception:
-                metadata, node_info, relationships = legacy_metadata_dict_to_node(
-                    metadata_dict
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    "llama_mongodb_patch: unexpected error during ObjectId coercion: %s",
+                    e,
                 )
-                node = TextNode(
-                    text=text,
-                    id_=id_str,
-                    metadata=metadata,
-                    start_char_idx=node_info.get("start", None),
-                    end_char_idx=node_info.get("end", None),
-                    relationships=relationships,
-                )
+                raise
 
             top_k_ids.append(id_str)
             top_k_nodes.append(node)

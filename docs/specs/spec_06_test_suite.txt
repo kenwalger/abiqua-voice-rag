@@ -1,0 +1,390 @@
+The Abiqua Collection
+Voice RAG System — Test Suite Specification
+Spec version 1.0  ·  Component: Testing  ·  Status: Draft
+Overview
+This document specifies the test suite for the Abiqua Collection Voice RAG system. The suite targets three high-impact areas: query classification logic, Pydantic schema contracts, and Rime TTS integration error handling. It deliberately excludes end-to-end tests against live Atlas and Rime APIs in CI — those dependencies are too slow, too expensive, and too fragile for automated runs.
+
+The goal is not coverage percentage. The goal is a test suite that catches the failures that matter most — misclassified queries silently returning wrong data, malformed API responses bypassing schema validation, and Rime error states propagating incorrectly to the client.
+
+Scope~25 tests across three categories. All tests run without live external API calls. pytest is the test runner. No coverage badge is required or targeted — the suite demonstrates testing judgment, not metric optimization.
+Testing Philosophy
+Each of the three test categories maps to a specific risk in the production system:
+
+CategoryDescriptionQuery classificationA misclassified query silently returns wrong data. A serial number classified as natural_language hits all three collections and may return a semantically similar but incorrect firearm. No error is raised. This is the highest-risk silent failure in the pipeline and the most important category to test.Pydantic schema contractsThe FastAPI request and response models are the contract between the Python backend and the TypeScript frontend. If a nullable field is not typed as Optional, a real record with a null year_end will cause a 500 in production. Schema tests validate the contract without requiring a running server.Rime integrationThe Rime integration handles external API errors and maps them to appropriate HTTP responses. A 429 from Rime must return a 503 to the client, not a 500 or a 200 with corrupted audio. These behaviors are testable with mocked HTTP responses and are critical to production reliability.
+Tooling and Setup
+Dependencies
+# Add to pyproject.toml under [dependency-groups] or [project.optional-dependencies]
+[dependency-groups]
+dev = [
+    'pytest>=8.0',
+    'pytest-asyncio>=0.23',
+    'httpx>=0.27',           # AsyncClient for FastAPI test client
+    'respx>=0.21',           # Mock httpx requests (if switching to httpx)
+]
+
+If the Rime integration uses urllib (as specced), mock at the urllib.request.urlopen level using unittest.mock.patch. No additional library required.
+
+Directory structure
+backend/
+??? tests/
+?   ??? __init__.py
+?   ??? test_classification.py   # Stage 1 query classification
+?   ??? test_schema.py           # Pydantic model contracts
+?   ??? test_rime.py             # Rime integration and error handling
+??? pytest.ini
+??? pyproject.toml
+
+pytest.ini
+[pytest]
+asyncio_mode = auto
+testpaths = tests
+python_files = test_*.py
+python_functions = test_*
+
+Running the suite
+# With uv
+uv run pytest
+
+# Verbose output
+uv run pytest -v
+
+# Single category
+uv run pytest tests/test_classification.py -v
+
+Category 1 — Query Classification
+Tests for the classify_query() function in orchestrator.py. This function is pure Python with no external dependencies — no mocking required. All tests are synchronous.
+
+Test inventory
+Test IDCategoryWhat it validatesCLS-01ClassificationPlain serial number '143960' classifies as serial_numberCLS-02ClassificationSerial with hash prefix '#91000' classifies as serial_numberCLS-03ClassificationSerial with word prefix 'serial 45231' classifies as serial_numberCLS-04ClassificationNatural language query classifies as natural_languageCLS-05ClassificationModel name only 'New Departure' classifies as natural_languageCLS-06ClassificationShort numeric string '123' (3 digits) classifies as natural_languageCLS-07Classification10-digit number classifies as natural_language (outside 4-9 range)CLS-08ClassificationMixed query 'serial 143960 nickel finish' classifies as serial_numberCLS-09ExtractionSerial number extracted correctly from 'serial 143960'CLS-10ExtractionSerial number extracted correctly from bare '143960'
+Implementation
+# tests/test_classification.py
+import pytest
+from app.orchestrator import classify_query, extract_serial_number
+
+class TestClassification:
+
+    def test_plain_serial_number(self):
+        result = classify_query('143960')
+        assert result == 'serial_number'
+
+    def test_hash_prefix_serial(self):
+        result = classify_query('#91000')
+        assert result == 'serial_number'
+
+    def test_word_prefix_serial(self):
+        result = classify_query('serial 45231')
+        assert result == 'serial_number'
+
+    def test_natural_language(self):
+        result = classify_query(
+            'tell me about the 1905 New Departure shipped to China'
+        )
+        assert result == 'natural_language'
+
+    def test_model_name_only(self):
+        result = classify_query('New Departure')
+        assert result == 'natural_language'
+
+    def test_three_digits_not_serial(self):
+        result = classify_query('123')
+        assert result == 'natural_language'
+
+    def test_ten_digits_not_serial(self):
+        result = classify_query('1234567890')
+        assert result == 'natural_language'
+
+    def test_mixed_query_with_serial(self):
+        result = classify_query('serial 143960 nickel finish')
+        assert result == 'serial_number'
+
+    def test_extract_from_word_prefix(self):
+        serial = extract_serial_number('serial 143960')
+        assert serial == '143960'
+
+    def test_extract_from_bare(self):
+        serial = extract_serial_number('143960')
+        assert serial == '143960'
+
+NoteIf classify_query and extract_serial_number are not separate importable functions in orchestrator.py, ask Cursor to refactor them out of run_query() as standalone functions before writing these tests. They should be independently testable by design.
+Category 2 — Pydantic Schema Contracts
+Tests for the request and response Pydantic models. These tests validate the data contract between the backend and frontend. No running server required — models are instantiated directly.
+
+Test inventory
+Test IDCategoryWhat it validatesSCH-01RequestValid QueryRequest with query only instantiates correctlySCH-02RequestQueryRequest with voice_id and top_k instantiates correctlySCH-03RequestQueryRequest rejects empty string query (min length 2)SCH-04RequestQueryRequest rejects query over 500 charactersSCH-05RequestQueryRequest rejects top_k over 20SCH-06ResponseQueryResponse with all fields including null year_end instantiates correctlySCH-07ResponseQueryResponse with empty image_refs array instantiates correctlySCH-08ResponseImageRef with null caption instantiates correctlySCH-09ResponseSourceMeta with null year_start and year_end instantiates correctlySCH-10ErrorApiError envelope matches expected shape with all required fields
+Implementation
+# tests/test_schema.py
+import pytest
+from pydantic import ValidationError
+from app.main import QueryRequest, QueryResponse, ImageRef, SourceMeta, ApiError
+
+class TestQueryRequest:
+
+    def test_valid_query_only(self):
+        req = QueryRequest(query='143960')
+        assert req.query == '143960'
+        assert req.top_k == 5  # default
+
+    def test_valid_with_all_fields(self):
+        req = QueryRequest(query='New Departure', voice_id='colby', top_k=10)
+        assert req.voice_id == 'colby'
+        assert req.top_k == 10
+
+    def test_rejects_empty_query(self):
+        with pytest.raises(ValidationError):
+            QueryRequest(query='x')  # min length 2
+
+    def test_rejects_long_query(self):
+        with pytest.raises(ValidationError):
+            QueryRequest(query='x' * 501)
+
+    def test_rejects_top_k_over_max(self):
+        with pytest.raises(ValidationError):
+            QueryRequest(query='143960', top_k=21)
+
+
+class TestQueryResponse:
+
+    def test_valid_response_with_null_year_end(self):
+        resp = QueryResponse(
+            narration_text='Test narration.',
+            audio_b64='dGVzdA==',
+            audio_mime='audio/mpeg',
+            image_count=0,
+            image_refs=[],
+            source_meta=SourceMeta(
+                model='.32 New Departure',
+                serial_range='143960',
+                year_start=1905,
+                year_end=None,   # null is valid
+                record_count=1,
+                confidence=1.0,
+            ),
+            query_echo='143960',
+            latency_ms=1200,
+        )
+        assert resp.source_meta.year_end is None
+
+    def test_empty_image_refs(self):
+        # image_refs can be empty list — should not raise
+        resp = QueryResponse(
+            narration_text='Test.',
+            audio_b64='dGVzdA==',
+            audio_mime='audio/mpeg',
+            image_count=0,
+            image_refs=[],
+            source_meta=SourceMeta(model='Test', serial_range='0',
+                year_start=None, year_end=None,
+                record_count=0, confidence=0.0),
+            query_echo='test',
+            latency_ms=100,
+        )
+        assert resp.image_refs == []
+
+    def test_image_ref_null_caption(self):
+        ref = ImageRef(
+            image_id='abc123',
+            url='https://example.com/img.webp',
+            caption=None,
+            primary=True,
+        )
+        assert ref.caption is None
+
+    def test_source_meta_all_null_years(self):
+        meta = SourceMeta(
+            model='Unknown', serial_range='0',
+            year_start=None, year_end=None,
+            record_count=0, confidence=0.0,
+        )
+        assert meta.year_start is None
+        assert meta.year_end is None
+
+    def test_api_error_shape(self):
+        err = ApiError(
+            ok=False,
+            status=422,
+            error='no_records_found',
+            detail='No matching records for serial number 999999.',
+        )
+        assert err.ok is False
+        assert err.status == 422
+
+Category 3 — Rime Integration
+Tests for the Rime TTS integration in rime.py. All tests mock the urllib HTTP call — no live Rime API calls are made. Tests validate correct behavior for success, error mapping, and audio encoding.
+
+Test inventory
+Test IDCategoryWhat it validatesRIME-01Successsynthesize() returns RimeResult with valid base64 mp3 on 200 responseRIME-02Successaudio_b64 decodes to the same bytes as the mocked response bodyRIME-03Successsynthesize() uses DEFAULT_VOICE when speaker arg is NoneRIME-04Successsynthesize() uses provided speaker when passed explicitlyRIME-05Text prep_clean_narration() strips markdown underscore formattingRIME-06Text prep_clean_narration() strips markdown bold asterisksRIME-07Text prep_clean_narration() strips markdown links leaving display textRIME-08Error mappingHTTPError 401 raises RuntimeError with 'rime_api_error:401' prefixRIME-09Error mappingHTTPError 429 raises RuntimeError with 'rime_api_error:429' prefixRIME-10Error mappingURLError raises RuntimeError with 'rime_unreachable' prefixRIME-11Voicesget_voices() returns parsed voice list on 200 responseRIME-12Voicesget_voices() raises RuntimeError on network failure
+Implementation
+# tests/test_rime.py
+import base64, json, pytest
+from unittest.mock import patch, MagicMock
+from urllib.error import HTTPError, URLError
+from app.rime import synthesize, get_voices, _clean_narration, RimeResult
+
+FAKE_MP3 = b'\xff\xfb\x90\x00' + b'\x00' * 100  # minimal mp3-like bytes
+FAKE_MP3_B64 = base64.b64encode(FAKE_MP3).decode('utf-8')
+
+def make_mock_response(body: bytes, status: int = 200):
+    mock = MagicMock()
+    mock.read.return_value = body
+    mock.status = status
+    mock.__enter__ = lambda s: s
+    mock.__exit__ = MagicMock(return_value=False)
+    return mock
+
+
+class TestSynthesize:
+
+    @pytest.mark.asyncio
+    async def test_returns_rime_result_on_success(self):
+        mock_resp = make_mock_response(FAKE_MP3)
+        with patch('urllib.request.urlopen', return_value=mock_resp):
+            result = await synthesize('The New Departure was produced in 1887.')
+        assert isinstance(result, RimeResult)
+        assert result.audio_mime == 'audio/mpeg'
+        assert result.audio_b64 == FAKE_MP3_B64
+
+    @pytest.mark.asyncio
+    async def test_audio_b64_decodes_correctly(self):
+        mock_resp = make_mock_response(FAKE_MP3)
+        with patch('urllib.request.urlopen', return_value=mock_resp):
+            result = await synthesize('Test narration.')
+        decoded = base64.b64decode(result.audio_b64)
+        assert decoded == FAKE_MP3
+
+    @pytest.mark.asyncio
+    async def test_uses_default_voice_when_none(self):
+        mock_resp = make_mock_response(FAKE_MP3)
+        with patch('urllib.request.urlopen', return_value=mock_resp) as mock_open:
+            result = await synthesize('Test.', speaker=None)
+        assert result.speaker == 'colby'  # RIME_DEFAULT_VOICE
+
+    @pytest.mark.asyncio
+    async def test_uses_provided_speaker(self):
+        mock_resp = make_mock_response(FAKE_MP3)
+        with patch('urllib.request.urlopen', return_value=mock_resp):
+            result = await synthesize('Test.', speaker='grove')
+        assert result.speaker == 'grove'
+
+    @pytest.mark.asyncio
+    async def test_401_raises_api_error(self):
+        err = HTTPError(url='', code=401, msg='Unauthorized',
+                        hdrs=None, fp=MagicMock())
+        err.read = lambda: b'{"error": "invalid_api_key"}'
+        with patch('urllib.request.urlopen', side_effect=err):
+            with pytest.raises(RuntimeError) as exc_info:
+                await synthesize('Test.')
+        assert 'rime_api_error:401' in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_429_raises_api_error(self):
+        err = HTTPError(url='', code=429, msg='Too Many Requests',
+                        hdrs=None, fp=MagicMock())
+        err.read = lambda: b'{"error": "rate_limit_exceeded"}'
+        with patch('urllib.request.urlopen', side_effect=err):
+            with pytest.raises(RuntimeError) as exc_info:
+                await synthesize('Test.')
+        assert 'rime_api_error:429' in str(exc_info.value)
+
+    @pytest.mark.asyncio
+    async def test_url_error_raises_unreachable(self):
+        with patch('urllib.request.urlopen',
+                   side_effect=URLError(reason='Connection refused')):
+            with pytest.raises(RuntimeError) as exc_info:
+                await synthesize('Test.')
+        assert 'rime_unreachable' in str(exc_info.value)
+
+
+class TestCleanNarration:
+
+    def test_strips_underscores(self):
+        result = _clean_narration('_Shipped_ in 1905.')
+        assert '_' not in result
+        assert 'Shipped' in result
+
+    def test_strips_bold_asterisks(self):
+        result = _clean_narration('**factory letter** on file.')
+        assert '*' not in result
+        assert 'factory letter' in result
+
+    def test_strips_markdown_links(self):
+        result = _clean_narration('[view record](https://example.com)')
+        assert 'view record' in result
+        assert 'https' not in result
+
+
+class TestGetVoices:
+
+    @pytest.mark.asyncio
+    async def test_returns_voice_list(self):
+        fake_voices = [{'id': 'colby', 'name': 'Colby', 'preview_url': None}]
+        mock_resp = make_mock_response(json.dumps(fake_voices).encode())
+        with patch('urllib.request.urlopen', return_value=mock_resp):
+            result = await get_voices()
+        assert result == {'voices': fake_voices}
+
+    @pytest.mark.asyncio
+    async def test_raises_on_network_failure(self):
+        with patch('urllib.request.urlopen',
+                   side_effect=URLError(reason='Name resolution failed')):
+            with pytest.raises(RuntimeError):
+                await get_voices()
+
+README Callout
+Add the following section to README.md between the Production Upgrade Paths table and the Project Structure section:
+
+## Tests
+
+The test suite covers three high-impact areas without requiring
+live external API calls:
+
+| Category | File | Tests | What it validates |
+|---|---|---|---|
+| Query classification | test_classification.py | 10 | Serial number vs. natural language routing |
+| Schema contracts | test_schema.py | 10 | Request validation and response envelope shape |
+| Rime integration | test_rime.py | 12 | Audio synthesis, error mapping, text preparation |
+
+```bash
+uv run pytest -v
+```
+
+End-to-end tests against live Atlas and Rime APIs are intentionally
+excluded from CI. The full pipeline is validated manually using the
+demo query documented in the Usage section.
+
+Instructions for Cursor
+When handing this spec to Cursor, use the following prompt structure:
+
+Implement the test suite described in this spec.
+
+Constraints:
+- pytest and pytest-asyncio only. No other test libraries.
+- All external API calls mocked via unittest.mock.patch.
+- No live Atlas, Rime, OpenAI, or Anthropic calls in any test.
+- Tests must pass with uv run pytest from the backend/ directory.
+- If classify_query or extract_serial_number are not importable
+  standalone functions in orchestrator.py, refactor them out
+  before writing the classification tests.
+
+Implement in this order:
+1. Add dev dependencies to pyproject.toml
+2. Create pytest.ini
+3. tests/__init__.py
+4. tests/test_classification.py
+5. tests/test_schema.py
+6. tests/test_rime.py
+
+Run uv run pytest -v after each file and confirm all tests pass
+before moving to the next file. Report any test that cannot pass
+due to a gap in the implementation rather than silently skipping it.
+
+Production Callouts
+End-to-end testsDemo: manual curl validation only. Production: add pytest-recording or VCR.py to record and replay real Atlas and Rime API responses as cassettes. This gives you integration test coverage without live API calls in CI and without the brittleness of pure mocks.
+CI pipelineDemo: tests run locally only. Production: GitHub Actions workflow running uv run pytest on every push to main. Add a simple workflow file at .github/workflows/test.yml. The test suite as specced runs in under 5 seconds with no external dependencies.
+Property-based testingDemo: fixed input examples. Production: use Hypothesis to generate edge cases for query classification automatically. Particularly valuable for the serial number regex — Hypothesis will find boundary cases (e.g. numbers with leading zeros, mixed alphanumeric strings) that hand-written tests miss.
+Frontend testsDemo: no frontend tests. Production: Vitest for React component unit tests, Playwright for browser-level end-to-end tests covering the full audio playback flow. The AudioPlayer component is the highest-value frontend test target given the autoplay and data URI complexity.
+Component Dependencies
+• FastAPI Routes Spec — QueryRequest, QueryResponse, ImageRef, SourceMeta, ApiError model definitions
+• LlamaIndex Orchestrator Spec v1.1 — classify_query() and extract_serial_number() functions
+• Rime TTS Integration Spec — synthesize(), get_voices(), _clean_narration(), RimeResult
+
+The Abiqua Collection Voice RAG System  ·  Test Suite Spec v1.0  ·  Draft

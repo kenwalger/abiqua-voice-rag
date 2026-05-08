@@ -115,7 +115,6 @@ class SourceMeta(BaseModel):
     year_end: int | None
     record_count: int
     confidence: float
-    short_url: str | None = None
     record_url: str | None = None
 
 
@@ -130,6 +129,7 @@ class QueryResponse(BaseModel):
     collections_hit: list[str]
     query_echo: str
     latency_ms: int
+    record_url: str | None = None
 
 
 class VoicesResponse(BaseModel):
@@ -207,10 +207,15 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 @app.exception_handler(ResponseValidationError)
 async def response_validation_handler(request: Request, exc: ResponseValidationError):
     logger.exception("response_model_validation_failed")
+    detail: str | list[Any]
+    if settings.EXPOSE_INTERNAL_ERRORS:
+        detail = exc.errors()
+    else:
+        detail = "Response validation failed"
     payload = ApiError(
         status=status.HTTP_500_INTERNAL_SERVER_ERROR,
         error="response_validation_error",
-        detail=exc.errors(),
+        detail=detail,
     )
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -255,10 +260,11 @@ async def ping_rime() -> str:
 @app.post("/query", response_model=QueryResponse)
 async def query_endpoint(payload: QueryRequest):
     start_time = time.time()
-    print(
-        f"[debug] entered /query query='{payload.query[:80]}' top_k={payload.top_k}",
-        flush=True,
-    )
+    if settings.PIPELINE_DEBUG:
+        print(
+            f"[debug] entered /query query='{payload.query[:80]}' top_k={payload.top_k}",
+            flush=True,
+        )
     pipe_log(
         "/query start q_preview=%s voice_id=%s voice_model_id=%s top_k=%s",
         (payload.query[:120] + "…") if len(payload.query) > 120 else payload.query,
@@ -311,6 +317,7 @@ async def query_endpoint(payload: QueryRequest):
         collections_hit=rag_result.collections_hit,
         query_echo=payload.query,
         latency_ms=latency_ms,
+        record_url=rag_result.source_meta.get("record_url"),
     )
 
 
@@ -340,7 +347,8 @@ async def ready() -> JSONResponse:
 async def voices() -> VoicesResponse:
     now = time.time()
     t_req = time.perf_counter()
-    print("[debug] entered /voices", flush=True)
+    if settings.PIPELINE_DEBUG:
+        print("[debug] entered /voices", flush=True)
     if VOICES_CACHE["expires_at"] > now:
         n = len(VOICES_CACHE["data"].get("voices", []))
         pipe_log("GET /voices cache_hit voices=%s elapsed_ms=%.1f", n, (time.perf_counter() - t_req) * 1000)

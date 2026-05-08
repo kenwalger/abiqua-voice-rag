@@ -346,7 +346,6 @@ def build_source_meta(chunks: list[NodeWithScore], parent_docs: dict[str, dict[s
             "year_end": None,
             "record_count": int(len(parent_docs)),
             "confidence": conf,
-            "short_url": short_url,
             "record_url": short_url,
         }
 
@@ -363,7 +362,6 @@ def build_source_meta(chunks: list[NodeWithScore], parent_docs: dict[str, dict[s
         "year_end": None,
         "record_count": int(len(chunks)),
         "confidence": conf,
-        "short_url": None,
         "record_url": None,
     }
 

@@ -51,6 +51,15 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and richer backend exception logging.
 - LlamaIndex MongoDB ObjectId compatibility issue (`TextNode.id_` expecting
   string under Pydantic v2) via runtime patching/normalization.
+- Review hardening fixes before Spec 06:
+  - `/query` and `/voices` route debug `print()` calls are now gated by
+    `PIPELINE_DEBUG`.
+  - `ResponseValidationError` now respects `EXPOSE_INTERNAL_ERRORS` and returns
+    `"Response validation failed"` by default.
+  - `llama_mongodb_patch` no longer swallows unexpected exceptions silently;
+    it logs a warning and re-raises.
+  - API envelope cleanup: canonical top-level `record_url` retained, duplicated
+    `short_url` response field removed.
 
 
 
