@@ -1,0 +1,32 @@
+Before implementing Spec 06, apply these two amendments:
+
+Amendment 1 — ImageGallery tests (no change needed)
+The ImageGallery component is no longer rendered but the image_refs
+and image_count fields remain in the response envelope and TypeScript
+types. All schema tests covering these fields remain as written in
+the spec. No ImageGallery component tests were specced so nothing
+is removed.
+
+Amendment 2 — Add two tests to test_schema.py
+
+SCH-11: record_url field is present in QueryResponse as Optional[str]
+  resp = QueryResponse(... record_url='https://theabiquacollection.com/f/fbGhMSuH' ...)
+  assert resp.record_url == 'https://theabiquacollection.com/f/fbGhMSuH'
+
+SCH-12: record_url field accepts None without validation error
+  resp = QueryResponse(... record_url=None ...)
+  assert resp.record_url is None
+
+Amendment 3 — Add one test to test_rime.py
+
+RIME-13: _clean_narration() preserves URLs intact
+  result = _clean_narration('View at https://theabiquacollection.com/f/abc123')
+  assert 'https://theabiquacollection.com/f/abc123' in result
+
+This test catches a regression risk — the markdown link stripping
+regex in _clean_narration() uses a pattern that could inadvertently
+strip bare URLs if the regex is too broad. This test pins the correct
+behavior.
+
+All other tests in the spec are unchanged. Total test count moves
+from 32 to 35.

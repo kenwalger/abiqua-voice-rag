@@ -22,4 +22,10 @@ dependencies = [
 
 [tool.uv]
 package = false
-dev-dependencies = []
+dev-dependencies = [
+    "pytest>=8,<9",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

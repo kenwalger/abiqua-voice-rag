@@ -4,14 +4,21 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from app.llama_mongodb_patch import apply_llama_mongodb_objectid_patch
+
+apply_llama_mongodb_objectid_patch()
+
 from anthropic import Anthropic
 from bson import ObjectId
+from bson.errors import InvalidId
 from llama_index.core import StorageContext, VectorStoreIndex
 from llama_index.core.schema import NodeWithScore, TextNode
 from llama_index.embeddings.openai import OpenAIEmbedding
 from llama_index.vector_stores.mongodb import MongoDBAtlasVectorSearch
 from pymongo import MongoClient
 
+from app.pipeline_log import log as plog
+from app.pipeline_log import timed_async
 from app.settings import get_settings
 
 settings = get_settings()
@@ -46,12 +53,17 @@ class OrchestratorResult:
     image_count: int
     image_refs: list[dict[str, Any]]
     source_meta: dict[str, Any]
+    record_url: str | None
     confidence: float
     query_type: str
     collections_hit: list[str]
 
 
-mongo_client = MongoClient(settings.MONGODB_URI)
+mongo_client = MongoClient(
+    settings.MONGODB_URI,
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=5000,
+)
 db = mongo_client[settings.MONGODB_DB_NAME]
 
 embed_model = OpenAIEmbedding(
@@ -60,13 +72,18 @@ embed_model = OpenAIEmbedding(
 )
 anthropic_client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
 
+retriever_firearms = None
+retriever_historical = None
+retriever_manufacturers = None
+_retrievers_initialized = False
 
-def build_index(collection_name: str, index_name: str) -> VectorStoreIndex:
+
+def build_index(collection_name: str, vector_index_name: str) -> VectorStoreIndex:
     vector_store = MongoDBAtlasVectorSearch(
         mongodb_client=mongo_client,
         db_name=settings.MONGODB_DB_NAME,
         collection_name=collection_name,
-        index_name=index_name,
+        vector_index_name=vector_index_name,
         embedding_key=settings.MONGODB_EMBEDDING_FIELD,
         text_key="text",
     )
@@ -78,18 +95,33 @@ def build_index(collection_name: str, index_name: str) -> VectorStoreIndex:
     )
 
 
-index_firearms = build_index(
-    settings.MONGODB_COLLECTION_FIREARMS_CHUNKS,
-    settings.MONGODB_INDEX_FIREARMS_CHUNKS,
-)
-index_historical = build_index(
-    settings.MONGODB_COLLECTION_HISTORICAL_CHUNKS,
-    settings.MONGODB_INDEX_HISTORICAL_CHUNKS,
-)
-index_manufacturers = build_index(
-    settings.MONGODB_COLLECTION_MANUFACTURERS_CHUNKS,
-    settings.MONGODB_INDEX_MANUFACTURERS_CHUNKS,
-)
+def build_retriever(collection_name: str, vector_index_name: str):
+    index = build_index(collection_name, vector_index_name)
+    return index.as_retriever(similarity_top_k=20)
+
+
+def initialize_retrievers() -> None:
+    global retriever_firearms, retriever_historical, retriever_manufacturers, _retrievers_initialized
+    if _retrievers_initialized:
+        return
+    plog("initialize_retrievers start")
+    rf = build_retriever(
+        settings.MONGODB_COLLECTION_FIREARMS_CHUNKS,
+        settings.MONGODB_INDEX_FIREARMS_CHUNKS,
+    )
+    rh = build_retriever(
+        settings.MONGODB_COLLECTION_HISTORICAL_CHUNKS,
+        settings.MONGODB_INDEX_HISTORICAL_CHUNKS,
+    )
+    rm = build_retriever(
+        settings.MONGODB_COLLECTION_MANUFACTURERS_CHUNKS,
+        settings.MONGODB_INDEX_MANUFACTURERS_CHUNKS,
+    )
+    retriever_firearms = rf
+    retriever_historical = rh
+    retriever_manufacturers = rm
+    _retrievers_initialized = True
+    plog("initialize_retrievers done")
 
 
 def classify_query(query: str) -> str:
@@ -109,9 +141,8 @@ async def embed_query(query: str) -> list[float]:
     return await asyncio.to_thread(embed_model.get_query_embedding, query)
 
 
-def _retrieve_with_index(index: VectorStoreIndex, query: str, top_k: int) -> list[NodeWithScore]:
-    retriever = index.as_retriever(similarity_top_k=top_k)
-    return retriever.retrieve(query)
+def _retrieve_with_retriever(retriever, query: str, top_k: int) -> list[NodeWithScore]:
+    return retriever.retrieve(query)[:top_k]
 
 
 def _is_firearms_chunk(chunk: NodeWithScore) -> bool:
@@ -162,6 +193,13 @@ async def retrieve(
     query_embedding: list[float],
     serial_parent_id: Any | None = None,
 ) -> list[NodeWithScore]:
+    plog(
+        "retrieve start query_type=%s top_k=%s serial_parent_id=%s q_preview=%s",
+        query_type,
+        top_k,
+        serial_parent_id,
+        (query[:120] + "…") if len(query) > 120 else query,
+    )
     if query_type == "serial_number":
         if serial_parent_id is not None:
             nodes = await asyncio.to_thread(
@@ -171,7 +209,7 @@ async def retrieve(
                 serial_parent_id,
             )
         else:
-            nodes = await asyncio.to_thread(_retrieve_with_index, index_firearms, query, top_k)
+            nodes = await asyncio.to_thread(_retrieve_with_retriever, retriever_firearms, query, top_k)
         if not nodes and serial_parent_id is None:
             nodes = await asyncio.to_thread(_direct_vector_search_firearms, query_embedding, top_k)
         filtered = [n for n in nodes if (n.score or 0.0) >= SCORE_THRESHOLD]
@@ -179,22 +217,39 @@ async def retrieve(
         # Serial queries can be exact identifiers where semantic scores are lower;
         # if thresholding removes all candidates, fall back to raw top-k.
         if filtered:
-            return filtered[:top_k]
+            out = filtered[:top_k]
+            plog("retrieve serial path=%s chunks=%s", "filtered", len(out))
+            return out
         nodes.sort(key=lambda n: n.score or 0.0, reverse=True)
-        return nodes[:top_k]
+        out = nodes[:top_k]
+        plog("retrieve serial path=%s chunks=%s", "raw_topk_fallback", len(out))
+        return out
 
     results = await asyncio.gather(
-        asyncio.to_thread(_retrieve_with_index, index_firearms, query, top_k),
-        asyncio.to_thread(_retrieve_with_index, index_historical, query, top_k),
-        asyncio.to_thread(_retrieve_with_index, index_manufacturers, query, top_k),
+        asyncio.to_thread(_retrieve_with_retriever, retriever_firearms, query, top_k),
+        asyncio.to_thread(_retrieve_with_retriever, retriever_historical, query, top_k),
+        asyncio.to_thread(_retrieve_with_retriever, retriever_manufacturers, query, top_k),
     )
     merged = [node for sublist in results for node in sublist]
     merged.sort(key=lambda n: n.score or 0.0, reverse=True)
-    return [n for n in merged if (n.score or 0.0) >= SCORE_THRESHOLD][:top_k]
+    filtered_nl = [n for n in merged if (n.score or 0.0) >= SCORE_THRESHOLD][:top_k]
+    plog(
+        "retrieve natural_language merged=%s after_threshold=%s",
+        len(merged),
+        len(filtered_nl),
+    )
+    return filtered_nl
 
 
 def fetch_parent_firearms(source_ids: list[str]) -> dict[str, dict[str, Any]]:
-    object_ids = [ObjectId(source_id) for source_id in source_ids if source_id]
+    object_ids: list[ObjectId] = []
+    for source_id in source_ids:
+        if not source_id:
+            continue
+        try:
+            object_ids.append(ObjectId(source_id))
+        except InvalidId:
+            continue
     if not object_ids:
         return {}
 
@@ -253,10 +308,15 @@ def build_image_refs(parent_docs: dict[str, dict[str, Any]]) -> list[dict[str, A
         for idx, image in enumerate(images):
             if isinstance(image, dict):
                 filename = image.get("filename") or image.get("url") or image.get("path")
-                caption = image.get("caption")
+                caption_raw = image.get("caption")
             else:
                 filename = str(image)
-                caption = None
+                caption_raw = None
+
+            if caption_raw is None or isinstance(caption_raw, str):
+                caption = caption_raw
+            else:
+                caption = str(caption_raw)
 
             if not filename:
                 continue
@@ -279,6 +339,16 @@ def build_image_refs(parent_docs: dict[str, dict[str, Any]]) -> list[dict[str, A
     return refs
 
 
+def _coerce_year_field(value: Any) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return None
+
+
 def build_source_meta(chunks: list[NodeWithScore], parent_docs: dict[str, dict[str, Any]]) -> dict[str, Any]:
     top_chunk = chunks[0] if chunks else None
     top_score = float(top_chunk.score or 0.0) if top_chunk else 0.0
@@ -291,13 +361,14 @@ def build_source_meta(chunks: list[NodeWithScore], parent_docs: dict[str, dict[s
 
     if top_parent:
         year_value = top_parent.get("year") or top_parent.get("estimated_year")
+        conf = round(top_score, 4)
         return {
-            "model": top_parent.get("model") or "Unknown",
+            "model": str(top_parent.get("model") or "Unknown"),
             "serial_range": str(top_parent.get("serial_number") or "Unknown"),
-            "year_start": year_value if isinstance(year_value, int) else None,
+            "year_start": _coerce_year_field(year_value),
             "year_end": None,
-            "record_count": len(parent_docs),
-            "confidence": round(top_score, 4),
+            "record_count": int(len(parent_docs)),
+            "confidence": conf,
         }
 
     top_model = (
@@ -305,14 +376,31 @@ def build_source_meta(chunks: list[NodeWithScore], parent_docs: dict[str, dict[s
         if top_chunk and isinstance(top_chunk.node.metadata, dict)
         else None
     )
+    conf = round(top_score, 4)
     return {
-        "model": top_model or "Unknown",
+        "model": str(top_model or "Unknown"),
         "serial_range": "Unknown",
         "year_start": None,
         "year_end": None,
-        "record_count": len(chunks),
-        "confidence": round(top_score, 4),
+        "record_count": int(len(chunks)),
+        "confidence": conf,
     }
+
+
+def extract_record_url(chunks: list[NodeWithScore], parent_docs: dict[str, dict[str, Any]]) -> str | None:
+    top_chunk = chunks[0] if chunks else None
+    if not top_chunk:
+        return None
+    source_id = top_chunk.node.metadata.get("source_firearm_id")
+    if not source_id:
+        return None
+    parent = parent_docs.get(str(source_id))
+    if not parent:
+        return None
+    short_url = parent.get("short_url")
+    if not short_url:
+        return None
+    return str(short_url).strip() or None
 
 
 def build_user_prompt(
@@ -358,9 +446,29 @@ async def synthesize_narration(user_prompt: str) -> str:
     return "\n".join(text_parts).strip()
 
 
+def _chunk_collections_preview(chunks: list[NodeWithScore]) -> str:
+    if not chunks:
+        return "none"
+    labels: list[str] = []
+    for c in chunks[:8]:
+        meta = c.node.metadata or {}
+        labels.append(str(meta.get("chunk_source_collection", "?")))
+    return ",".join(labels)
+
+
 async def run_query(query: str, top_k: int) -> OrchestratorResult:
-    query_type = classify_query(query)
-    query_embedding = await embed_query(query)
+    if not _retrievers_initialized:
+        raise RuntimeError("retrievers_not_initialized")
+    plog("run_query start top_k=%s q_preview=%s", top_k, (query[:160] + "…") if len(query) > 160 else query)
+
+    async with timed_async("classify_query"):
+        query_type = classify_query(query)
+
+    async with timed_async("embed_query"):
+        query_embedding = await embed_query(query)
+
+    plog("run_query classified query_type=%s embed_dim=%s", query_type, len(query_embedding))
+
     serial_parent_doc: dict[str, Any] | None = None
     serial_parent_id: Any | None = None
     used_serial_fallback = False
@@ -371,16 +479,19 @@ async def run_query(query: str, top_k: int) -> OrchestratorResult:
             serial_parent_doc = find_parent_firearm_by_serial(serial_number)
             if serial_parent_doc is not None:
                 serial_parent_id = serial_parent_doc.get("_id")
+                plog("serial lookup hit _id=%s", serial_parent_id)
             else:
                 used_serial_fallback = True
+                plog("serial lookup miss for %s — semantic fallback", serial_number)
 
-    chunks = await retrieve(
-        query,
-        query_type,
-        top_k,
-        query_embedding,
-        serial_parent_id=serial_parent_id,
-    )
+    async with timed_async("retrieve"):
+        chunks = await retrieve(
+            query,
+            query_type,
+            top_k,
+            query_embedding,
+            serial_parent_id=serial_parent_id,
+        )
     if query_type == "serial_number" and serial_parent_doc is not None and not chunks:
         serial_source_id = str(serial_parent_doc["_id"])
         summary_parts = [
@@ -404,6 +515,8 @@ async def run_query(query: str, top_k: int) -> OrchestratorResult:
         )
         chunks = [NodeWithScore(node=synthetic_node, score=1.0)]
 
+    plog("run_query chunks=%s collections_preview=%s", len(chunks), _chunk_collections_preview(chunks))
+
     if serial_parent_doc is not None:
         parent_docs = {str(serial_parent_doc["_id"]): serial_parent_doc}
     else:
@@ -419,8 +532,17 @@ async def run_query(query: str, top_k: int) -> OrchestratorResult:
         parent_docs = fetch_parent_firearms(source_ids)
     image_refs = build_image_refs(parent_docs)
     source_meta = build_source_meta(chunks, parent_docs)
+    record_url = extract_record_url(chunks, parent_docs)
     user_prompt = build_user_prompt(query, chunks, parent_docs, len(image_refs))
-    narration_text = await synthesize_narration(user_prompt)
+    async with timed_async("anthropic_narration"):
+        narration_text = await synthesize_narration(user_prompt)
+
+    plog(
+        "run_query done narration_chars=%s parent_docs=%s images=%s",
+        len(narration_text),
+        len(parent_docs),
+        len(image_refs),
+    )
 
     collections_hit = sorted(
         {
@@ -437,6 +559,7 @@ async def run_query(query: str, top_k: int) -> OrchestratorResult:
         image_count=len(image_refs),
         image_refs=image_refs,
         source_meta=source_meta,
+        record_url=record_url,
         confidence=source_meta.get("confidence", 0.0),
         query_type=query_type,
         collections_hit=collections_hit,

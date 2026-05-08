@@ -12,6 +12,21 @@ speech via Rime TTS — alongside source metadata and archival images.
 > **Demo video:** [Watch the demo](https://www.youtube.com/watch?v=YOUR_VIDEO_ID)
 > *(Add link once recorded)*
 
+## Contents
+
+- [What this demonstrates](#what-this-demonstrates)
+- [Architecture](#architecture)
+- [Stack](#stack)
+- [Prerequisites](#prerequisites)
+- [Setup](#setup)
+- [Usage](#usage)
+- [Tests](#tests)
+- [Production upgrade paths](#production-upgrade-paths)
+- [Project structure](#project-structure)
+- [Data note](#data-note)
+- [Related content](#related-content)
+- [License](#license)
+
 ---
 
 ## What this demonstrates
@@ -35,25 +50,72 @@ spanning the 1880s through the mid-20th century.
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    A([User query\nserial number or natural language]) --> B
+
+    subgraph Frontend ["React Frontend (Vite + TypeScript)"]
+        B[QueryForm\nsubmit query + voice_id]
+        R[AudioPlayer\nplay base64 mp3]
+        S[NarrationPanel\ndisplay narration text]
+        T[MetadataPanel\nmodel · year · confidence · latency]
+    end
+
+    B -->|POST /query| C
+
+    subgraph Backend ["FastAPI Backend (Python 3.11+)"]
+        C[Request validation\nPydantic QueryRequest]
+        C --> D[Stage 1\nQuery classification]
+        D --> E[Stage 2\nOpenAI text-embedding-3-small\n1536-dim vector]
+        E --> F{Query type?}
+    end
+
+    subgraph Retrieval ["Stage 3a — Atlas Vector Search"]
+        F -->|serial_number| G[firearms direct lookup\nby serial_number field]
+        G --> H[firearms_rag_chunks\nscoped by source_firearm_id]
+        F -->|natural_language| I[firearms_rag_chunks]
+        F -->|natural_language| J[historical_events_rag_chunks]
+        F -->|natural_language| K[manufacturers_rag_chunks]
+        I & J & K --> L[Merge + re-sort by score\nfilter below threshold 0.70]
+    end
+
+    subgraph Lookup ["Stage 3b — Secondary Lookup"]
+        H --> M[Fetch parent firearms doc\nby source_firearm_id]
+        L --> M
+        M --> N[images · factory_letter\nserial · year · finish · short_url]
+    end
+
+    subgraph Synthesis ["Stages 4 + 5 — Narration"]
+        N --> O[Build narration prompt\nchunk text + parent metadata]
+        O --> P[Claude claude-haiku-4-5\nmax_tokens 400 · temp 0.3]
+        P --> Q[narration_text]
+    end
+
+    subgraph Voice ["Rime TTS — Voice Layer"]
+        Q --> V[_clean_narration\nstrip markdown]
+        V --> W[Rime Arcana model\nspeaker: colby\nspeedAlpha: 0.95]
+        W --> X[base64 mp3\n~875 KB · 22050 Hz]
+    end
+
+    X --> Y[Assemble response envelope\nnarration_text · audio_b64\nsource_meta · record_url · latency_ms]
+    Y -->|JSON response| R
+    Y --> S
+    Y --> T
+
+    style Frontend fill:#1c1917,stroke:#78716c,color:#e7e5e4
+    style Backend fill:#1c1917,stroke:#78716c,color:#e7e5e4
+    style Retrieval fill:#1c1917,stroke:#92400e,color:#e7e5e4
+    style Lookup fill:#1c1917,stroke:#92400e,color:#e7e5e4
+    style Synthesis fill:#1c1917,stroke:#1d4ed8,color:#e7e5e4
+    style Voice fill:#1c1917,stroke:#15803d,color:#e7e5e4
 ```
-React (Vite + TypeScript)
-        │
-        │  POST /query  { query, voice_id }
-        ▼
-FastAPI backend
-        │
-        ├── LlamaIndex orchestrator
-        │       ├── Query classification (serial number vs. natural language)
-        │       ├── OpenAI text-embedding-3-small
-        │       ├── MongoDB Atlas Vector Search
-        │       └── Claude (claude-haiku-4-5) narration synthesis
-        │
-        └── Rime TTS (Arcana model)
-                └── Returns base64 mp3 in JSON envelope
-```
+
 
 Full architecture decisions and component contracts are in `/docs/specs/`.
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed Mermaid diagrams
+including query routing logic, collection data model, and demo vs.
+production decision map.
 ---
 
 ## Stack
@@ -68,7 +130,7 @@ Full architecture decisions and component contracts are in `/docs/specs/`.
 | Vector database    | MongoDB Atlas Vector Search                |
 | Embeddings         | OpenAI text-embedding-3-small              |
 | LLM                | Anthropic Claude (claude-haiku-4-5)        |
-| TTS                | Rime Arcana model                          |
+| TTS                | Rime (default: Mist model, configurable)   |
 | Collection data    | MongoDB Atlas (proprietary — not included) |
 
 
@@ -176,6 +238,9 @@ uv run uvicorn app.main:app --reload --port 8000
 uvicorn app.main:app --reload --port 8000
 ```
 
+> If you see inconsistent behavior or no logs, ensure only one process is
+> listening on port 8000 before starting uvicorn.
+
 Verify it's running:
 
 ```bash
@@ -187,8 +252,13 @@ Check all dependencies are reachable:
 
 ```bash
 curl http://localhost:8000/ready
-# {"status":"ready","atlas":"ok","rime":"ok"}
+# HTTP 200 — {"status":"ready","atlas":"ok","rime":"ok"} when Atlas and Rime respond
+# HTTP 503 — {"status":"degraded","atlas":"unreachable",...} (or rime unreachable) when a dependency fails
 ```
+
+On startup, the backend builds LlamaIndex retrievers once (lifespan) before
+`Application startup complete`; the first `/health` should return quickly
+after that.
 
 ### 5. Frontend
 
@@ -206,6 +276,49 @@ npm run dev
 ```
 
 Open [http://localhost:5173](http://localhost:5173).
+
+---
+
+## Debugging and diagnostics
+
+### Backend pipeline logs
+
+Enable detailed backend timing logs for `/voices`, retrieval, narration, and
+TTS:
+
+```bash
+PIPELINE_DEBUG=true
+LOG_LEVEL=INFO
+```
+
+Optional local error detail in JSON responses:
+
+```bash
+EXPOSE_INTERNAL_ERRORS=true
+```
+
+Restart backend after changing env values.
+
+### Frontend API timing logs
+
+Enable axios request/response timing logs in the browser console:
+
+```bash
+VITE_PIPELINE_DEBUG=true
+```
+
+Restart Vite dev server after changing `.env.local`.
+
+### Port 8000 contention (Windows)
+
+If requests time out and logs do not appear, you may have multiple listeners on
+`127.0.0.1:8000`. Clear the port and run one backend process:
+
+```powershell
+Get-NetTCPConnection -LocalPort 8000 -State Listen | Select-Object -Expand OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force }
+cd c:\Users\kenal\abiqua-voice-rag\backend
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --log-level debug --access-log
+```
 
 ---
 
@@ -244,6 +357,7 @@ before narration synthesis.
     "year_start": 1905,
     "confidence": 1.0
   },
+  "record_url": "https://theabiquacollection.com/f/fbGhMSuH",
   "collections_hit": ["firearms_direct_lookup"],
   "latency_ms": 3862
 }
@@ -274,7 +388,7 @@ Serial number `143960` exercises the full pipeline end to end:
 
 - **Record:** .32 New Departure 2nd Model, 1905, nickel finish
 - **Retrieval path:** `firearms_direct_lookup` (deterministic serial match)
-- **Audio:** ~875 KB synthesized mp3, Rime Arcana model, voice: colby
+- **Audio:** ~875 KB synthesized mp3, Rime Mist model, voice: abbie
 - **Images:** 4 archival images
 - **Pipeline latency:** ~3.8s (sync retrieval, pre-streaming)
 
@@ -289,6 +403,25 @@ different regional endpoint, set `RIME_BASE_URL` in your `.env`:
 
 ```bash
 RIME_BASE_URL=https://users.rime.ai
+```
+
+---
+
+## Tests
+
+From the `backend/` directory (uses the uv-managed virtualenv):
+
+```bash
+uv sync
+uv run pytest -v
+```
+
+If a globally installed `pytest` pulls incompatible plugins on your machine,
+run with plugin autoload disabled:
+
+```bash
+# PowerShell
+$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD='1'; uv run pytest -v
 ```
 
 ---

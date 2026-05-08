@@ -9,6 +9,93 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added (2026-05 Updates)
+
+- Opt-in pipeline diagnostics:
+  - Backend `PIPELINE_DEBUG` flag with `[pipeline]` timing logs for `/voices`,
+    retrieval, Anthropic narration, and TTS phases.
+  - Frontend `VITE_PIPELINE_DEBUG` flag with axios request/response timing logs.
+- Global backend error visibility improvements:
+  - Early logging configuration for Windows/uvicorn terminals.
+  - Explicit traceback logging for unhandled request exceptions.
+  - Optional `EXPOSE_INTERNAL_ERRORS` setting to surface exception detail in
+    local debugging responses.
+- Top-level `record_url` in `/query` responses when a direct parent firearm
+  record is resolved.
+
+### Changed (2026-05 Updates)
+
+- Rime defaults and model handling:
+  - Added `RIME_DEFAULT_MODEL` setting and switched default model/voice pairing
+    to `mist` + `abbie`.
+  - `/query` now accepts and forwards `voice_model_id` so selected voice/model
+    combinations stay valid.
+- Backend settings now load `.env` from an absolute path based on
+  `backend/app/settings.py`, preventing launch-directory drift.
+- Frontend metadata panel updates:
+  - Removed `Series` row.
+  - Renamed `Serial Range` to `Serial Number`.
+  - Shows linked serial value with `(View)` when a record URL is present.
+  - Changed `Production years` display to `Year Shipped` single-year format.
+- Image gallery feature has been fully removed from the frontend:
+  - Deleted `frontend/src/components/ImageGallery.tsx`.
+  - Removed frontend `ImageRef` type and `image_refs` / `image_count` fields
+    from `frontend/src/types/api.ts` `QueryResponse`.
+  - Frontend now ignores backend `image_refs` / `image_count` while preserving
+    backend response compatibility.
+- Metadata URL contract cleanup:
+  - `record_url` is now canonical at the top-level response field.
+  - `SourceMeta` is constrained to `model`, `serial_range`, `year_start`,
+    `year_end`, `record_count`, and `confidence`.
+  - `MetadataPanel` now consumes top-level `record_url` instead of reading URL
+    data from `source_meta`.
+- Added README table of contents immediately after the demo placeholder.
+- Replaced deprecated `asyncio.get_event_loop()` executor usage in
+  `backend/app/rime.py` with `asyncio.get_running_loop().run_in_executor(...)`
+  for both `synthesize()` and `get_voices()`.
+- Readiness and startup behavior:
+  - `GET /ready` now runs real dependency checks in parallel: MongoDB Atlas
+    `admin.command("ping")` and an authenticated `HEAD` to Rime
+    `{RIME_BASE_URL}/v1/voices` (non-2xx/5xx responses map to `unreachable` as
+    appropriate). Returns HTTP **200** with `status: "ready"` only when both
+    dependencies are **ok**; otherwise HTTP **503** with `status: "degraded"`.
+  - LlamaIndex retriever construction runs during FastAPI **lifespan** startup
+    via `initialize_retrievers()` (threaded), so heavy index work does not block
+    the first `/query` on a cold process the same way as module import-time
+    construction.
+  - `MongoClient` uses short `serverSelectionTimeoutMS` / `connectTimeoutMS`
+    so unreachable Atlas fails quickly during pings and init.
+  - Lifespan logs and continues if retriever initialization fails (e.g. bad
+    `MONGODB_URI`), so `/health` and `/ready` still respond with accurate
+    degraded status instead of hanging startup.
+- Backend tests: `pytest` added as a uv dev-dependency, `tests/test_smoke.py`,
+  and `[tool.pytest.ini_options]` (`pythonpath`, `testpaths`) so
+  `uv run pytest -v` uses the project venv without global plugin conflicts.
+- Frontend: when `VITE_PIPELINE_DEBUG` is true, Vite HMR `dispose` clears axios
+  pipeline interceptors so they do not accumulate across reloads.
+
+### Fixed (2026-05 Updates)
+
+- Duplicate voice selector keys caused by repeated model/voice rows from Rime
+  catalog flattening.
+- Missing/ambiguous voice selector behavior by adding explicit loading/error
+  states and defensive voice payload normalization.
+- CORS behavior on error envelopes by ensuring error responses include
+  appropriate origin headers.
+- Silent 500 diagnosis blocker by forcing terminal-visible debug entry prints
+  and richer backend exception logging.
+- LlamaIndex MongoDB ObjectId compatibility issue (`TextNode.id_` expecting
+  string under Pydantic v2) via runtime patching/normalization.
+- Review hardening fixes before Spec 06:
+  - `/query` and `/voices` route debug `print()` calls are now gated by
+    `PIPELINE_DEBUG`.
+  - `ResponseValidationError` now respects `EXPOSE_INTERNAL_ERRORS` and returns
+    `"Response validation failed"` by default.
+  - `llama_mongodb_patch` no longer swallows unexpected exceptions silently;
+    it logs a warning and re-raises.
+  - API envelope cleanup: canonical top-level `record_url` retained, duplicated
+    `short_url` response field removed.
+
 
 
 

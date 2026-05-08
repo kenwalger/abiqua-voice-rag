@@ -7,6 +7,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from app.pipeline_log import log as plog
 from app.settings import get_settings
 
 settings = get_settings()
@@ -17,7 +18,7 @@ RIME_VOICES_URL = f"{RIME_BASE_URL}/v1/voices"
 RIME_VOICES_DATA_URL = f"{RIME_BASE_URL}/data/voices/all-v2.json"
 RIME_API_KEY = settings.RIME_API_KEY
 DEFAULT_VOICE = settings.RIME_DEFAULT_VOICE
-DEFAULT_MODEL = "arcana"
+DEFAULT_MODEL = settings.RIME_DEFAULT_MODEL
 SPEED_ALPHA = 0.95
 SAMPLING_RATE = 22050
 
@@ -44,15 +45,27 @@ def _ensure_mp3_header(audio_bytes: bytes) -> bytes:
     return b"ID3\x03\x00\x00\x00\x00\x00\x00" + audio_bytes
 
 
-async def synthesize(narration_text: str, speaker: str | None = None) -> RimeResult:
+async def synthesize(
+    narration_text: str,
+    speaker: str | None = None,
+    model_id: str | None = None,
+) -> RimeResult:
     selected_speaker = speaker or DEFAULT_VOICE
+    selected_model = (model_id or "").strip() or DEFAULT_MODEL
     text = _clean_narration(narration_text)
+    plog(
+        "rime synthesize POST %s speaker=%s model=%s text_chars=%s",
+        RIME_API_URL,
+        selected_speaker,
+        selected_model,
+        len(text),
+    )
 
     payload = json.dumps(
         {
             "text": text,
             "speaker": selected_speaker,
-            "modelId": DEFAULT_MODEL,
+            "modelId": selected_model,
             "speedAlpha": SPEED_ALPHA,
             "samplingRate": SAMPLING_RATE,
             "reduceLatency": False,
@@ -71,14 +84,12 @@ async def synthesize(narration_text: str, speaker: str | None = None) -> RimeRes
         method="POST",
     )
 
-    loop = asyncio.get_event_loop()
-
     def _do_request() -> bytes:
         with urllib.request.urlopen(request, timeout=30) as response:
             return response.read()
 
     try:
-        audio_bytes = await loop.run_in_executor(None, _do_request)
+        audio_bytes = await asyncio.get_running_loop().run_in_executor(None, _do_request)
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"rime_api_error:{exc.code}:{body}") from exc
@@ -91,13 +102,13 @@ async def synthesize(narration_text: str, speaker: str | None = None) -> RimeRes
         audio_b64=base64.b64encode(audio_bytes).decode("utf-8"),
         audio_mime="audio/mpeg",
         speaker=selected_speaker,
-        model_id=DEFAULT_MODEL,
+        model_id=selected_model,
         char_count=len(text),
     )
 
 
 async def get_voices() -> dict[str, Any]:
-    loop = asyncio.get_event_loop()
+    plog("rime get_voices start base=%s", RIME_BASE_URL)
 
     def _fetch(url: str, method: str, data: bytes | None = None, auth: bool = True) -> Any:
         headers = {"Content-Type": "application/json"}
@@ -109,7 +120,7 @@ async def get_voices() -> dict[str, Any]:
             data=data,
             method=method,
         )
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(request, timeout=25) as response:
             return json.loads(response.read())
 
     def _normalize_voices(voices_raw: Any) -> dict[str, Any]:
@@ -138,18 +149,49 @@ async def get_voices() -> dict[str, Any]:
                 return {"voices": flattened}
         return {"voices": []}
 
+    # Public catalog — no API key; avoids 503 when /v1/voices rejects or misbehaves on some regions.
     try:
-        voices_raw = await loop.run_in_executor(None, _fetch, RIME_VOICES_URL, "GET", None, True)
+        plog("rime get_voices fetch public_json GET %s", RIME_VOICES_DATA_URL)
+        data_first = await asyncio.get_running_loop().run_in_executor(
+            None, _fetch, RIME_VOICES_DATA_URL, "GET", None, False
+        )
+        normalized_first = _normalize_voices(data_first)
+        if normalized_first.get("voices"):
+            plog(
+                "rime get_voices public_json_ok voices=%s",
+                len(normalized_first["voices"]),
+            )
+            return normalized_first
+        plog("rime get_voices public_json_empty_normalized retry_authenticated")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")[:300]
+        plog(
+            "rime get_voices public_json_http_error code=%s body_preview=%s",
+            exc.code,
+            body,
+        )
+    except urllib.error.URLError as exc:
+        plog("rime get_voices public_json_url_error %s", exc.reason)
+    except json.JSONDecodeError as exc:
+        plog("rime get_voices public_json_json_error %s", exc)
+
+    try:
+        plog("rime get_voices fetch GET %s", RIME_VOICES_URL)
+        voices_raw = await asyncio.get_running_loop().run_in_executor(
+            None, _fetch, RIME_VOICES_URL, "GET", None, True
+        )
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         if exc.code == 400 and "request body is required" in body.lower():
             try:
-                voices_raw = await loop.run_in_executor(None, _fetch, RIME_VOICES_URL, "POST", b"{}", True)
+                voices_raw = await asyncio.get_running_loop().run_in_executor(
+                    None, _fetch, RIME_VOICES_URL, "POST", b"{}", True
+                )
             except urllib.error.HTTPError as inner_exc:
                 inner_body = inner_exc.read().decode("utf-8", errors="replace")
                 if inner_exc.code == 400 and "text is required" in inner_body.lower():
                     try:
-                        data_voices = await loop.run_in_executor(
+                        data_voices = await asyncio.get_running_loop().run_in_executor(
                             None, _fetch, RIME_VOICES_DATA_URL, "GET", None, False
                         )
                     except urllib.error.HTTPError as data_exc:
@@ -162,8 +204,25 @@ async def get_voices() -> dict[str, Any]:
             except urllib.error.URLError as inner_exc:
                 raise RuntimeError(f"rime_unreachable:{inner_exc.reason}") from inner_exc
             return _normalize_voices(voices_raw)
-        raise RuntimeError(f"rime_api_error:{exc.code}:{body}") from exc
+        try:
+            data_voices = await asyncio.get_running_loop().run_in_executor(
+                None, _fetch, RIME_VOICES_DATA_URL, "GET", None, False
+            )
+            return _normalize_voices(data_voices)
+        except urllib.error.HTTPError as data_exc:
+            data_body = data_exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"rime_api_error:{data_exc.code}:{data_body}") from data_exc
+        except urllib.error.URLError as data_exc:
+            raise RuntimeError(f"rime_unreachable:{data_exc.reason}") from data_exc
     except urllib.error.URLError as exc:
-        raise RuntimeError(f"rime_unreachable:{exc.reason}") from exc
+        try:
+            data_voices = await asyncio.get_running_loop().run_in_executor(
+                None, _fetch, RIME_VOICES_DATA_URL, "GET", None, False
+            )
+            return _normalize_voices(data_voices)
+        except urllib.error.URLError:
+            raise RuntimeError(f"rime_unreachable:{exc.reason}") from exc
 
-    return _normalize_voices(voices_raw)
+    out = _normalize_voices(voices_raw)
+    plog("rime get_voices final_normalize voices=%s", len(out.get("voices", [])))
+    return out
