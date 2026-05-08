@@ -12,6 +12,21 @@ speech via Rime TTS — alongside source metadata and archival images.
 > **Demo video:** [Watch the demo](https://www.youtube.com/watch?v=YOUR_VIDEO_ID)
 > *(Add link once recorded)*
 
+## Contents
+
+- [What this demonstrates](#what-this-demonstrates)
+- [Architecture](#architecture)
+- [Stack](#stack)
+- [Prerequisites](#prerequisites)
+- [Setup](#setup)
+- [Usage](#usage)
+- [Tests](#tests)
+- [Production upgrade paths](#production-upgrade-paths)
+- [Project structure](#project-structure)
+- [Data note](#data-note)
+- [Related content](#related-content)
+- [License](#license)
+
 ---
 
 ## What this demonstrates

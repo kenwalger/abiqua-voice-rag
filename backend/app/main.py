@@ -115,7 +115,6 @@ class SourceMeta(BaseModel):
     year_end: int | None
     record_count: int
     confidence: float
-    record_url: str | None = None
 
 
 class QueryResponse(BaseModel):
@@ -312,12 +311,19 @@ async def query_endpoint(payload: QueryRequest):
         audio_mime=tts_result.audio_mime,
         image_count=rag_result.image_count,
         image_refs=rag_result.image_refs,
-        source_meta=rag_result.source_meta,
+        source_meta=SourceMeta(
+            model=rag_result.source_meta.get("model", "Unknown"),
+            serial_range=rag_result.source_meta.get("serial_range", "Unknown"),
+            year_start=rag_result.source_meta.get("year_start"),
+            year_end=rag_result.source_meta.get("year_end"),
+            record_count=int(rag_result.source_meta.get("record_count", 0)),
+            confidence=float(rag_result.source_meta.get("confidence", 0.0)),
+        ),
         query_type=rag_result.query_type,
         collections_hit=rag_result.collections_hit,
         query_echo=payload.query,
         latency_ms=latency_ms,
-        record_url=rag_result.source_meta.get("record_url"),
+        record_url=rag_result.record_url,
     )
 
 

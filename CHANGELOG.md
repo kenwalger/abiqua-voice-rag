@@ -20,8 +20,8 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - Explicit traceback logging for unhandled request exceptions.
   - Optional `EXPOSE_INTERNAL_ERRORS` setting to surface exception detail in
     local debugging responses.
-- `source_meta.short_url` and `source_meta.record_url` in `/query` responses
-  when a direct parent firearm record is resolved.
+- Top-level `record_url` in `/query` responses when a direct parent firearm
+  record is resolved.
 
 ### Changed (2026-05 Updates)
 
@@ -37,7 +37,22 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - Renamed `Serial Range` to `Serial Number`.
   - Shows linked serial value with `(View)` when a record URL is present.
   - Changed `Production years` display to `Year Shipped` single-year format.
-- Image gallery is no longer rendered in `App.tsx` (component file retained).
+- Image gallery feature has been fully removed from the frontend:
+  - Deleted `frontend/src/components/ImageGallery.tsx`.
+  - Removed frontend `ImageRef` type and `image_refs` / `image_count` fields
+    from `frontend/src/types/api.ts` `QueryResponse`.
+  - Frontend now ignores backend `image_refs` / `image_count` while preserving
+    backend response compatibility.
+- Metadata URL contract cleanup:
+  - `record_url` is now canonical at the top-level response field.
+  - `SourceMeta` is constrained to `model`, `serial_range`, `year_start`,
+    `year_end`, `record_count`, and `confidence`.
+  - `MetadataPanel` now consumes top-level `record_url` instead of reading URL
+    data from `source_meta`.
+- Added README table of contents immediately after the demo placeholder.
+- Replaced deprecated `asyncio.get_event_loop()` executor usage in
+  `backend/app/rime.py` with `asyncio.get_running_loop().run_in_executor(...)`
+  for both `synthesize()` and `get_voices()`.
 
 ### Fixed (2026-05 Updates)
 

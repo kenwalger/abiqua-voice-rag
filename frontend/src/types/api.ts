@@ -1,10 +1,3 @@
-export interface ImageRef {
-  image_id: string;
-  url: string;
-  caption: string | null;
-  primary: boolean;
-}
-
 export interface SourceMeta {
   model: string;
   serial_range: string;
@@ -12,21 +5,18 @@ export interface SourceMeta {
   year_end: number | null;
   record_count: number;
   confidence: number;
-  short_url?: string | null;
-  record_url?: string | null;
 }
 
 export interface QueryResponse {
   narration_text: string;
   audio_b64: string;
   audio_mime: string;
-  image_count: number;
-  image_refs: ImageRef[];
   source_meta: SourceMeta;
   query_type: string;
   collections_hit: string[];
   query_echo: string;
   latency_ms: number;
+  record_url?: string | null;
 }
 
 export interface Voice {

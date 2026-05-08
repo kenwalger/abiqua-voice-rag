@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 
 interface MetadataPanelProps {
   source_meta: SourceMeta;
+  record_url: string | null | undefined;
   latency_ms: number;
   query_echo: string;
 }
@@ -13,6 +14,7 @@ function formatYear(value: number | null): string {
 
 export function MetadataPanel({
   source_meta,
+  record_url,
   latency_ms,
   query_echo: _query_echo,
 }: MetadataPanelProps) {
@@ -23,7 +25,6 @@ export function MetadataPanel({
     year_end,
     record_count,
     confidence,
-    record_url,
   } =
     source_meta;
   const yearShipped = year_start ?? year_end;

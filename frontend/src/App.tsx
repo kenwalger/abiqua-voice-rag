@@ -168,6 +168,7 @@ function App() {
             <NarrationPanel narration_text={response.narration_text} />
             <MetadataPanel
               source_meta={response.source_meta}
+              record_url={response.record_url}
               latency_ms={response.latency_ms}
               query_echo={response.query_echo}
             />

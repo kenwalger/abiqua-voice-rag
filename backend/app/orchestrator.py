@@ -53,6 +53,7 @@ class OrchestratorResult:
     image_count: int
     image_refs: list[dict[str, Any]]
     source_meta: dict[str, Any]
+    record_url: str | None
     confidence: float
     query_type: str
     collections_hit: list[str]
@@ -338,7 +339,6 @@ def build_source_meta(chunks: list[NodeWithScore], parent_docs: dict[str, dict[s
     if top_parent:
         year_value = top_parent.get("year") or top_parent.get("estimated_year")
         conf = round(top_score, 4)
-        short_url = str(top_parent.get("short_url")).strip() if top_parent.get("short_url") else None
         return {
             "model": str(top_parent.get("model") or "Unknown"),
             "serial_range": str(top_parent.get("serial_number") or "Unknown"),
@@ -346,7 +346,6 @@ def build_source_meta(chunks: list[NodeWithScore], parent_docs: dict[str, dict[s
             "year_end": None,
             "record_count": int(len(parent_docs)),
             "confidence": conf,
-            "record_url": short_url,
         }
 
     top_model = (
@@ -362,8 +361,23 @@ def build_source_meta(chunks: list[NodeWithScore], parent_docs: dict[str, dict[s
         "year_end": None,
         "record_count": int(len(chunks)),
         "confidence": conf,
-        "record_url": None,
     }
+
+
+def extract_record_url(chunks: list[NodeWithScore], parent_docs: dict[str, dict[str, Any]]) -> str | None:
+    top_chunk = chunks[0] if chunks else None
+    if not top_chunk:
+        return None
+    source_id = top_chunk.node.metadata.get("source_firearm_id")
+    if not source_id:
+        return None
+    parent = parent_docs.get(str(source_id))
+    if not parent:
+        return None
+    short_url = parent.get("short_url")
+    if not short_url:
+        return None
+    return str(short_url).strip() or None
 
 
 def build_user_prompt(
@@ -493,6 +507,7 @@ async def run_query(query: str, top_k: int) -> OrchestratorResult:
         parent_docs = fetch_parent_firearms(source_ids)
     image_refs = build_image_refs(parent_docs)
     source_meta = build_source_meta(chunks, parent_docs)
+    record_url = extract_record_url(chunks, parent_docs)
     user_prompt = build_user_prompt(query, chunks, parent_docs, len(image_refs))
     async with timed_async("anthropic_narration"):
         narration_text = await synthesize_narration(user_prompt)
@@ -519,6 +534,7 @@ async def run_query(query: str, top_k: int) -> OrchestratorResult:
         image_count=len(image_refs),
         image_refs=image_refs,
         source_meta=source_meta,
+        record_url=record_url,
         confidence=source_meta.get("confidence", 0.0),
         query_type=query_type,
         collections_hit=collections_hit,
