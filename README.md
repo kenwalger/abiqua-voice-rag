@@ -252,8 +252,13 @@ Check all dependencies are reachable:
 
 ```bash
 curl http://localhost:8000/ready
-# {"status":"ready","atlas":"ok","rime":"ok"}
+# HTTP 200 — {"status":"ready","atlas":"ok","rime":"ok"} when Atlas and Rime respond
+# HTTP 503 — {"status":"degraded","atlas":"unreachable",...} (or rime unreachable) when a dependency fails
 ```
+
+On startup, the backend builds LlamaIndex retrievers once (lifespan) before
+`Application startup complete`; the first `/health` should return quickly
+after that.
 
 ### 5. Frontend
 
@@ -398,6 +403,25 @@ different regional endpoint, set `RIME_BASE_URL` in your `.env`:
 
 ```bash
 RIME_BASE_URL=https://users.rime.ai
+```
+
+---
+
+## Tests
+
+From the `backend/` directory (uses the uv-managed virtualenv):
+
+```bash
+uv sync
+uv run pytest -v
+```
+
+If a globally installed `pytest` pulls incompatible plugins on your machine,
+run with plugin autoload disabled:
+
+```bash
+# PowerShell
+$env:PYTEST_DISABLE_PLUGIN_AUTOLOAD='1'; uv run pytest -v
 ```
 
 ---

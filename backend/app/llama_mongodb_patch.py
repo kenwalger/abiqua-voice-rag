@@ -25,7 +25,6 @@ def apply_llama_mongodb_objectid_patch() -> None:
     )
     from llama_index.vector_stores.mongodb.base import (
         MongoDBAtlasVectorSearch,
-        legacy_metadata_dict_to_node,
         metadata_dict_to_node,
     )
 

@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import sys
 import time
@@ -145,6 +146,12 @@ class ApiError(BaseModel):
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     _configure_logging_early()
+    from app.orchestrator import initialize_retrievers
+
+    try:
+        await asyncio.to_thread(initialize_retrievers)
+    except Exception as exc:
+        logger.warning("initialize_retrievers failed (degraded): %s", exc)
     yield
 
 
@@ -249,11 +256,42 @@ app.add_middleware(
 
 
 async def ping_atlas() -> str:
-    return "ok"
+    try:
+        from app.orchestrator import mongo_client
+
+        await asyncio.to_thread(mongo_client.admin.command, "ping")
+        return "ok"
+    except Exception as e:
+        logging.getLogger(__name__).warning("Atlas ping failed: %s", e)
+        return "unreachable"
 
 
 async def ping_rime() -> str:
-    return "ok"
+    try:
+        import urllib.request
+        import urllib.error
+
+        from app.settings import get_settings
+
+        settings = get_settings()
+        req = urllib.request.Request(
+            f"{settings.RIME_BASE_URL}/v1/voices",
+            headers={"Authorization": f"Bearer {settings.RIME_API_KEY}"},
+            method="HEAD",
+        )
+
+        def _do_head():
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                return resp.status
+
+        try:
+            status_code = await asyncio.to_thread(_do_head)
+        except urllib.error.HTTPError as e:
+            status_code = e.code
+        return "ok" if status_code < 500 else "unreachable"
+    except Exception as e:
+        logging.getLogger(__name__).warning("Rime ping failed: %s", e)
+        return "unreachable"
 
 
 @app.post("/query", response_model=QueryResponse)
@@ -273,7 +311,15 @@ async def query_endpoint(payload: QueryRequest):
     )
 
     t_rag = time.perf_counter()
-    rag_result = await _run_query_fn()(payload.query, payload.top_k)
+    try:
+        rag_result = await _run_query_fn()(payload.query, payload.top_k)
+    except RuntimeError as exc:
+        if str(exc) == "retrievers_not_initialized":
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=str(exc),
+            ) from exc
+        raise
     pipe_log(
         "/query rag_complete elapsed_ms=%.1f query_type=%s chunks_collections=%s",
         (time.perf_counter() - t_rag) * 1000,
@@ -334,18 +380,19 @@ async def health() -> dict[str, str]:
 
 @app.get("/ready")
 async def ready() -> JSONResponse:
-    atlas_status = await ping_atlas()
-    rime_status = await ping_rime()
-
-    if atlas_status == "ok" and rime_status == "ok":
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content={"status": "ready", "atlas": "ok", "rime": "ok"},
-        )
-
+    atlas_status, rime_status = await asyncio.gather(
+        ping_atlas(),
+        ping_rime(),
+    )
+    overall = "ready" if atlas_status == "ok" and rime_status == "ok" else "degraded"
+    status_code = status.HTTP_200_OK if overall == "ready" else status.HTTP_503_SERVICE_UNAVAILABLE
     return JSONResponse(
-        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-        content={"status": "degraded", "atlas": atlas_status, "rime": rime_status},
+        status_code=status_code,
+        content={
+            "status": overall,
+            "atlas": atlas_status,
+            "rime": rime_status,
+        },
     )
 
 

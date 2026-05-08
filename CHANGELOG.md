@@ -53,6 +53,26 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Replaced deprecated `asyncio.get_event_loop()` executor usage in
   `backend/app/rime.py` with `asyncio.get_running_loop().run_in_executor(...)`
   for both `synthesize()` and `get_voices()`.
+- Readiness and startup behavior:
+  - `GET /ready` now runs real dependency checks in parallel: MongoDB Atlas
+    `admin.command("ping")` and an authenticated `HEAD` to Rime
+    `{RIME_BASE_URL}/v1/voices` (non-2xx/5xx responses map to `unreachable` as
+    appropriate). Returns HTTP **200** with `status: "ready"` only when both
+    dependencies are **ok**; otherwise HTTP **503** with `status: "degraded"`.
+  - LlamaIndex retriever construction runs during FastAPI **lifespan** startup
+    via `initialize_retrievers()` (threaded), so heavy index work does not block
+    the first `/query` on a cold process the same way as module import-time
+    construction.
+  - `MongoClient` uses short `serverSelectionTimeoutMS` / `connectTimeoutMS`
+    so unreachable Atlas fails quickly during pings and init.
+  - Lifespan logs and continues if retriever initialization fails (e.g. bad
+    `MONGODB_URI`), so `/health` and `/ready` still respond with accurate
+    degraded status instead of hanging startup.
+- Backend tests: `pytest` added as a uv dev-dependency, `tests/test_smoke.py`,
+  and `[tool.pytest.ini_options]` (`pythonpath`, `testpaths`) so
+  `uv run pytest -v` uses the project venv without global plugin conflicts.
+- Frontend: when `VITE_PIPELINE_DEBUG` is true, Vite HMR `dispose` clears axios
+  pipeline interceptors so they do not accumulate across reloads.
 
 ### Fixed (2026-05 Updates)
 

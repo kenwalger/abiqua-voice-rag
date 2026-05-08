@@ -59,7 +59,11 @@ class OrchestratorResult:
     collections_hit: list[str]
 
 
-mongo_client = MongoClient(settings.MONGODB_URI)
+mongo_client = MongoClient(
+    settings.MONGODB_URI,
+    serverSelectionTimeoutMS=5000,
+    connectTimeoutMS=5000,
+)
 db = mongo_client[settings.MONGODB_DB_NAME]
 
 embed_model = OpenAIEmbedding(
@@ -67,6 +71,11 @@ embed_model = OpenAIEmbedding(
     api_key=settings.OPENAI_API_KEY,
 )
 anthropic_client = Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+
+retriever_firearms = None
+retriever_historical = None
+retriever_manufacturers = None
+_retrievers_initialized = False
 
 
 def build_index(collection_name: str, vector_index_name: str) -> VectorStoreIndex:
@@ -86,18 +95,33 @@ def build_index(collection_name: str, vector_index_name: str) -> VectorStoreInde
     )
 
 
-index_firearms = build_index(
-    settings.MONGODB_COLLECTION_FIREARMS_CHUNKS,
-    settings.MONGODB_INDEX_FIREARMS_CHUNKS,
-)
-index_historical = build_index(
-    settings.MONGODB_COLLECTION_HISTORICAL_CHUNKS,
-    settings.MONGODB_INDEX_HISTORICAL_CHUNKS,
-)
-index_manufacturers = build_index(
-    settings.MONGODB_COLLECTION_MANUFACTURERS_CHUNKS,
-    settings.MONGODB_INDEX_MANUFACTURERS_CHUNKS,
-)
+def build_retriever(collection_name: str, vector_index_name: str):
+    index = build_index(collection_name, vector_index_name)
+    return index.as_retriever(similarity_top_k=20)
+
+
+def initialize_retrievers() -> None:
+    global retriever_firearms, retriever_historical, retriever_manufacturers, _retrievers_initialized
+    if _retrievers_initialized:
+        return
+    plog("initialize_retrievers start")
+    rf = build_retriever(
+        settings.MONGODB_COLLECTION_FIREARMS_CHUNKS,
+        settings.MONGODB_INDEX_FIREARMS_CHUNKS,
+    )
+    rh = build_retriever(
+        settings.MONGODB_COLLECTION_HISTORICAL_CHUNKS,
+        settings.MONGODB_INDEX_HISTORICAL_CHUNKS,
+    )
+    rm = build_retriever(
+        settings.MONGODB_COLLECTION_MANUFACTURERS_CHUNKS,
+        settings.MONGODB_INDEX_MANUFACTURERS_CHUNKS,
+    )
+    retriever_firearms = rf
+    retriever_historical = rh
+    retriever_manufacturers = rm
+    _retrievers_initialized = True
+    plog("initialize_retrievers done")
 
 
 def classify_query(query: str) -> str:
@@ -117,9 +141,8 @@ async def embed_query(query: str) -> list[float]:
     return await asyncio.to_thread(embed_model.get_query_embedding, query)
 
 
-def _retrieve_with_index(index: VectorStoreIndex, query: str, top_k: int) -> list[NodeWithScore]:
-    retriever = index.as_retriever(similarity_top_k=top_k)
-    return retriever.retrieve(query)
+def _retrieve_with_retriever(retriever, query: str, top_k: int) -> list[NodeWithScore]:
+    return retriever.retrieve(query)[:top_k]
 
 
 def _is_firearms_chunk(chunk: NodeWithScore) -> bool:
@@ -186,7 +209,7 @@ async def retrieve(
                 serial_parent_id,
             )
         else:
-            nodes = await asyncio.to_thread(_retrieve_with_index, index_firearms, query, top_k)
+            nodes = await asyncio.to_thread(_retrieve_with_retriever, retriever_firearms, query, top_k)
         if not nodes and serial_parent_id is None:
             nodes = await asyncio.to_thread(_direct_vector_search_firearms, query_embedding, top_k)
         filtered = [n for n in nodes if (n.score or 0.0) >= SCORE_THRESHOLD]
@@ -203,9 +226,9 @@ async def retrieve(
         return out
 
     results = await asyncio.gather(
-        asyncio.to_thread(_retrieve_with_index, index_firearms, query, top_k),
-        asyncio.to_thread(_retrieve_with_index, index_historical, query, top_k),
-        asyncio.to_thread(_retrieve_with_index, index_manufacturers, query, top_k),
+        asyncio.to_thread(_retrieve_with_retriever, retriever_firearms, query, top_k),
+        asyncio.to_thread(_retrieve_with_retriever, retriever_historical, query, top_k),
+        asyncio.to_thread(_retrieve_with_retriever, retriever_manufacturers, query, top_k),
     )
     merged = [node for sublist in results for node in sublist]
     merged.sort(key=lambda n: n.score or 0.0, reverse=True)
@@ -434,6 +457,8 @@ def _chunk_collections_preview(chunks: list[NodeWithScore]) -> str:
 
 
 async def run_query(query: str, top_k: int) -> OrchestratorResult:
+    if not _retrievers_initialized:
+        raise RuntimeError("retrievers_not_initialized")
     plog("run_query start top_k=%s q_preview=%s", top_k, (query[:160] + "…") if len(query) > 160 else query)
 
     async with timed_async("classify_query"):

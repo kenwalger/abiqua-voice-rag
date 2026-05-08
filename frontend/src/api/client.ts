@@ -69,6 +69,12 @@ if (PIPELINE_DEBUG) {
       return Promise.reject(error);
     },
   );
+  if (import.meta.hot) {
+    import.meta.hot.dispose(() => {
+      axios.interceptors.request.clear();
+      axios.interceptors.response.clear();
+    });
+  }
 }
 
 /** POST /query can take a long time (retrieval + Claude + TTS). */
