@@ -57,6 +57,9 @@ class OrchestratorResult:
     confidence: float
     query_type: str
     collections_hit: list[str]
+    embedding_tokens: int
+    narration_input_tokens: int
+    narration_output_tokens: int
 
 
 mongo_client = MongoClient(
@@ -429,7 +432,7 @@ def build_user_prompt(
     return f"Query: {query}\n\nSource records:\n{context}\n\n{image_instruction}"
 
 
-async def synthesize_narration(user_prompt: str) -> str:
+async def synthesize_narration(user_prompt: str) -> tuple[str, int, int]:
     response = await asyncio.to_thread(
         anthropic_client.messages.create,
         model="claude-haiku-4-5-20251001",
@@ -443,7 +446,11 @@ async def synthesize_narration(user_prompt: str) -> str:
     for block in response.content:
         if getattr(block, "type", None) == "text":
             text_parts.append(block.text)
-    return "\n".join(text_parts).strip()
+    narration_text = "\n".join(text_parts).strip()
+    usage = getattr(response, "usage", None)
+    narration_input_tokens = int(getattr(usage, "input_tokens", 0) or 0)
+    narration_output_tokens = int(getattr(usage, "output_tokens", 0) or 0)
+    return narration_text, narration_input_tokens, narration_output_tokens
 
 
 def _chunk_collections_preview(chunks: list[NodeWithScore]) -> str:
@@ -466,6 +473,9 @@ async def run_query(query: str, top_k: int) -> OrchestratorResult:
 
     async with timed_async("embed_query"):
         query_embedding = await embed_query(query)
+
+    # LlamaIndex embed path does not expose OpenAI usage here; approximate token count.
+    embedding_tokens = max(1, int(len(query.split()) * 1.3))
 
     plog("run_query classified query_type=%s embed_dim=%s", query_type, len(query_embedding))
 
@@ -535,7 +545,9 @@ async def run_query(query: str, top_k: int) -> OrchestratorResult:
     record_url = extract_record_url(chunks, parent_docs)
     user_prompt = build_user_prompt(query, chunks, parent_docs, len(image_refs))
     async with timed_async("anthropic_narration"):
-        narration_text = await synthesize_narration(user_prompt)
+        narration_text, narration_input_tokens, narration_output_tokens = await synthesize_narration(
+            user_prompt
+        )
 
     plog(
         "run_query done narration_chars=%s parent_docs=%s images=%s",
@@ -563,4 +575,7 @@ async def run_query(query: str, top_k: int) -> OrchestratorResult:
         confidence=source_meta.get("confidence", 0.0),
         query_type=query_type,
         collections_hit=collections_hit,
+        embedding_tokens=embedding_tokens,
+        narration_input_tokens=narration_input_tokens,
+        narration_output_tokens=narration_output_tokens,
     )

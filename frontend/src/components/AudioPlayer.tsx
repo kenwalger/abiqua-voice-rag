@@ -10,12 +10,20 @@ export function AudioPlayer({ audio_b64, audio_mime }: AudioPlayerProps) {
   const src = `data:${audio_mime};base64,${audio_b64}`;
 
   useEffect(() => {
-    const el = audioRef.current;
-    if (!el) {
-      return;
+    if (audioRef.current) {
+      audioRef.current.load();
+      audioRef.current.play().catch(() => {
+        // Autoplay blocked — controls remain visible
+      });
     }
-    el.load();
-    void el.play().catch(() => {});
+    return () => {
+      // Pause only — do not clear `src` here. React commits the new `src` prop
+      // before this cleanup runs; setting src="" would wipe the new data URL and
+      // leave the element with no source for the next effect's load()/play().
+      if (audioRef.current) {
+        audioRef.current.pause();
+      }
+    };
   }, [audio_b64]);
 
   return (
