@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import axios from "axios";
 import { fetchVoices, submitQuery } from "./api/client";
 import { AudioPlayer } from "./components/AudioPlayer";
+import { CognitiveBudgetPanel } from "./components/CognitiveBudgetPanel";
 import { MetadataPanel } from "./components/MetadataPanel";
 import { NarrationPanel } from "./components/NarrationPanel";
 import { QueryForm } from "./components/QueryForm";
@@ -172,6 +173,9 @@ function App() {
               latency_ms={response.latency_ms}
               query_echo={response.query_echo}
             />
+            {response.cognitive_budget ? (
+              <CognitiveBudgetPanel budget={response.cognitive_budget} />
+            ) : null}
           </>
         ) : null}
       </div>

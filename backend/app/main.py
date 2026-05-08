@@ -4,6 +4,7 @@ import sys
 import time
 import traceback
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from functools import lru_cache
 from typing import Any
 
@@ -13,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
+from app.pipeline_cost import calculate_cost
 from app.pipeline_log import log as pipe_log
 from app.rime import get_voices, synthesize
 from app.settings import get_settings
@@ -69,8 +71,24 @@ def _public_error_detail(exc: BaseException) -> str | list[Any]:
     return "An unexpected error occurred."
 
 
-VOICES_CACHE: dict[str, Any] = {"expires_at": 0.0, "data": {"voices": []}}
-VOICES_CACHE_TTL_SECONDS = 300
+_voices_cache: dict[str, Any] | None = None
+_voices_cache_time: float = 0.0
+_voices_lock = asyncio.Lock()
+VOICES_CACHE_TTL = 300  # 5 minutes
+
+
+async def get_cached_voices() -> dict[str, Any]:
+    global _voices_cache, _voices_cache_time
+    async with _voices_lock:
+        if (
+            _voices_cache is not None
+            and time.time() - _voices_cache_time < VOICES_CACHE_TTL
+        ):
+            return _voices_cache
+        result = await get_voices()
+        _voices_cache = result
+        _voices_cache_time = time.time()
+        return _voices_cache
 
 
 def cors_headers_for_request(request: Request) -> dict[str, str]:
@@ -118,6 +136,22 @@ class SourceMeta(BaseModel):
     confidence: float
 
 
+class CognitiveBudget(BaseModel):
+    embedding_tokens: int
+    narration_input_tokens: int
+    narration_output_tokens: int
+    tts_characters: int
+    collections_queried: int
+    routing_decision: str
+    narration_model: str
+    embedding_cost_usd: float
+    narration_cost_usd: float
+    tts_cost_usd: float
+    total_cost_usd: float
+    daily_cost_at_10k_usd: float
+    pricing_date: str
+
+
 class QueryResponse(BaseModel):
     narration_text: str
     audio_b64: str
@@ -130,6 +164,7 @@ class QueryResponse(BaseModel):
     query_echo: str
     latency_ms: int
     record_url: str | None = None
+    cognitive_budget: CognitiveBudget
 
 
 class VoicesResponse(BaseModel):
@@ -351,6 +386,16 @@ async def query_endpoint(payload: QueryRequest):
 
     latency_ms = int((time.time() - start_time) * 1000)
 
+    cost = calculate_cost(
+        embedding_tokens=rag_result.embedding_tokens,
+        narration_input_tokens=rag_result.narration_input_tokens,
+        narration_output_tokens=rag_result.narration_output_tokens,
+        tts_characters=tts_result.char_count,
+        collections_queried=len(rag_result.collections_hit),
+        routing_decision=rag_result.query_type,
+        narration_model="claude-haiku-4-5-20251001",
+    )
+
     return QueryResponse(
         narration_text=rag_result.narration_text,
         audio_b64=tts_result.audio_b64,
@@ -370,6 +415,7 @@ async def query_endpoint(payload: QueryRequest):
         query_echo=payload.query,
         latency_ms=latency_ms,
         record_url=rag_result.record_url,
+        cognitive_budget=CognitiveBudget(**asdict(cost)),
     )
 
 
@@ -398,18 +444,13 @@ async def ready() -> JSONResponse:
 
 @app.get("/voices", response_model=VoicesResponse)
 async def voices() -> VoicesResponse:
-    now = time.time()
     t_req = time.perf_counter()
     if settings.PIPELINE_DEBUG:
         print("[debug] entered /voices", flush=True)
-    if VOICES_CACHE["expires_at"] > now:
-        n = len(VOICES_CACHE["data"].get("voices", []))
-        pipe_log("GET /voices cache_hit voices=%s elapsed_ms=%.1f", n, (time.perf_counter() - t_req) * 1000)
-        return VoicesResponse(voices=VOICES_CACHE["data"]["voices"])
 
-    pipe_log("GET /voices cache_miss fetching")
+    pipe_log("GET /voices fetching (cached)")
     try:
-        voices_data = await get_voices()
+        voices_data = await get_cached_voices()
     except RuntimeError as exc:
         message = str(exc)
         if message.startswith("rime_api_error:") or message.startswith("rime_unreachable:"):
@@ -425,8 +466,6 @@ async def voices() -> VoicesResponse:
         raise
 
     raw_list = voices_data.get("voices", [])
-    VOICES_CACHE["data"] = voices_data
-    VOICES_CACHE["expires_at"] = now + VOICES_CACHE_TTL_SECONDS
     pipe_log(
         "GET /voices ok voices=%s elapsed_ms=%.1f",
         len(raw_list),

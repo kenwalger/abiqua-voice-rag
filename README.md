@@ -20,6 +20,7 @@ speech via Rime TTS — alongside source metadata and archival images.
 - [Prerequisites](#prerequisites)
 - [Setup](#setup)
 - [Usage](#usage)
+- [Cognitive budget](#cognitive-budget)
 - [Tests](#tests)
 - [Production upgrade paths](#production-upgrade-paths)
 - [Project structure](#project-structure)
@@ -41,6 +42,9 @@ and prompt synthesis in a clean five-stage pipeline
 configurable regional endpoint and voice
 - **Demo vs. production callouts** — every architectural shortcut is
 documented with its production upgrade path
+- **Cognitive budget** — per-query USD estimates for embedding, Claude Haiku
+narration, and Rime TTS (public pricing snapshot), plus routing and a rough
+“at 10,000 queries/day” projection, surfaced in the UI below metadata
 
 This is not a toy dataset. The firearms collection contains real provenance
 records including factory letters, shipping records, and archival notes
@@ -59,6 +63,7 @@ flowchart TD
         R[AudioPlayer\nplay base64 mp3]
         S[NarrationPanel\ndisplay narration text]
         T[MetadataPanel\nmodel · year · confidence · latency]
+        U2[CognitiveBudgetPanel\nest. cost · routing]
     end
 
     B -->|POST /query| C
@@ -97,10 +102,11 @@ flowchart TD
         W --> X[base64 mp3\n~875 KB · 22050 Hz]
     end
 
-    X --> Y[Assemble response envelope\nnarration_text · audio_b64\nsource_meta · record_url · latency_ms]
+    X --> Y[Assemble response envelope\nnarration_text · audio_b64\nsource_meta · record_url · cognitive_budget · latency_ms]
     Y -->|JSON response| R
     Y --> S
     Y --> T
+    Y --> U2
 
     style Frontend fill:#1c1917,stroke:#78716c,color:#e7e5e4
     style Backend fill:#1c1917,stroke:#78716c,color:#e7e5e4
@@ -363,6 +369,33 @@ before narration synthesis.
 }
 ```
 
+Successful responses also include a **`cognitive_budget`** object (token counts,
+per-line-item and total USD estimates, routing decision, collections queried,
+`daily_cost_at_10k_usd`, and `pricing_date`). Expand the **Cognitive Budget**
+panel in the UI for the full breakdown.
+
+---
+
+## Cognitive budget
+
+Each `POST /query` response includes **`cognitive_budget`**, a structured cost
+snapshot intended for demos and internal “tiered intelligence” discussions—not
+for billing:
+
+- **Backend** — `app/pipeline_cost.py` applies published-style unit rates
+  (embedding per token, Haiku input/output per token, Rime per character). The
+  orchestrator supplies **Anthropic `usage`** token counts from the narration
+  call; embedding tokens use a **heuristic** (`max(1, int(len(query.split()) * 1.3))`)
+  because this path does not add a separate OpenAI usage call.
+- **Envelope** — `cognitive_budget` is a top-level sibling of `source_meta` and
+  `record_url` (see `QueryResponse` in `backend/app/main.py`).
+- **Frontend** — `CognitiveBudgetPanel` sits below `MetadataPanel`, **collapsed by
+  default** (summary line with total estimate and routing). Click to expand for
+  the line-item table, “at 10,000/day” row, and the pricing-date disclaimer.
+
+Treat all figures as **estimates**; swap `PRICING` / `PRICING_DATE` in
+`pipeline_cost.py` when vendors change rates.
+
 ---
 
 ## Verifying your Atlas Vector Search index
@@ -391,6 +424,8 @@ Serial number `143960` exercises the full pipeline end to end:
 - **Audio:** ~875 KB synthesized mp3, Rime Mist model, voice: abbie
 - **Images:** 4 archival images
 - **Pipeline latency:** ~3.8s (sync retrieval, pre-streaming)
+- **Cognitive Budget:** expand the panel under metadata for per-query USD
+  estimates and routing context
 
 Natural language queries hit all three rag_chunks collections
 concurrently and merge results before narration synthesis.
@@ -452,10 +487,11 @@ Full rationale for each decision is in the spec documents under `/docs/specs/`.
 abiqua-voice-rag/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py            # FastAPI app and route definitions
-│   │   ├── orchestrator.py    # LlamaIndex pipeline
-│   │   ├── rime.py            # Rime TTS integration
-│   │   └── settings.py        # Environment variable loading
+│   │   ├── main.py              # FastAPI app and route definitions
+│   │   ├── orchestrator.py      # LlamaIndex pipeline
+│   │   ├── pipeline_cost.py     # Cognitive budget USD estimates
+│   │   ├── rime.py              # Rime TTS integration
+│   │   └── settings.py          # Environment variable loading
 │   ├── scripts/
 │   │   └── migrate_search_text.py
 │   ├── pyproject.toml         # uv / pip dependencies
@@ -466,7 +502,7 @@ abiqua-voice-rag/
 │   │   ├── App.tsx
 │   │   ├── api/client.ts
 │   │   ├── types/api.ts
-│   │   └── components/
+│   │   └── components/          # includes CognitiveBudgetPanel.tsx
 │   ├── package.json
 │   └── .env.example
 ├── docs/

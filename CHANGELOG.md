@@ -22,6 +22,17 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     local debugging responses.
 - Top-level `record_url` in `/query` responses when a direct parent firearm
   record is resolved.
+- **Cognitive Budget** — per-query cost visibility on `/query`:
+  - New `backend/app/pipeline_cost.py` (`calculate_cost`, `CostEstimate`,
+    configurable `PRICING` / `PRICING_DATE`).
+  - Orchestrator records Anthropic narration **input/output tokens** from
+    `response.usage`; embedding side uses a **documented heuristic** token count
+    (no extra OpenAI usage API call).
+  - `QueryResponse` exposes nested **`cognitive_budget`** (Pydantic
+    `CognitiveBudget` in `main.py`).
+  - Frontend: `CognitiveBudget` TypeScript type, collapsible
+    `CognitiveBudgetPanel` below metadata (stone/amber styling), wired from
+    `App.tsx`.
 
 ### Changed (2026-05 Updates)
 
@@ -73,6 +84,9 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `uv run pytest -v` uses the project venv without global plugin conflicts.
 - Frontend: when `VITE_PIPELINE_DEBUG` is true, Vite HMR `dispose` clears axios
   pipeline interceptors so they do not accumulate across reloads.
+- `/voices` voice catalog caching now uses **`asyncio.Lock`** and
+  **`get_cached_voices()`** so concurrent cache misses cannot trigger duplicate
+  Rime fetches before the TTL entry is written.
 
 ### Fixed (2026-05 Updates)
 
@@ -95,6 +109,14 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
     it logs a warning and re-raises.
   - API envelope cleanup: canonical top-level `record_url` retained, duplicated
     `short_url` response field removed.
+- **`AudioPlayer`**: effect cleanup now **pauses only** on unmount / before
+  `audio_b64` updates—**no longer clears `src`** in cleanup, which had raced
+  React’s controlled `data:` URL and prevented playback after new queries.
+- **CI smoke test**: `tests/test_smoke.py` uses module-level
+  `pytest.skip(..., allow_module_level=True)` when required API keys are missing
+  from **`os.environ`**; `tests/test_collects.py` ensures at least one test is
+  still collected when smoke is skipped (avoids pytest exit code 5 with zero
+  collected tests).
 
 
 
