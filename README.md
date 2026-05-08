@@ -38,7 +38,7 @@ spanning the 1880s through the mid-20th century.
 ```
 React (Vite + TypeScript)
         │
-        │  POST /query  { query, voice_id }
+        │  POST /query  { query, voice_id, voice_model_id? }
         ▼
 FastAPI backend
         │
@@ -48,7 +48,7 @@ FastAPI backend
         │       ├── MongoDB Atlas Vector Search
         │       └── Claude (claude-haiku-4-5) narration synthesis
         │
-        └── Rime TTS (Arcana model)
+        └── Rime TTS (default: Mist model, configurable)
                 └── Returns base64 mp3 in JSON envelope
 ```
 
@@ -68,7 +68,7 @@ Full architecture decisions and component contracts are in `/docs/specs/`.
 | Vector database    | MongoDB Atlas Vector Search                |
 | Embeddings         | OpenAI text-embedding-3-small              |
 | LLM                | Anthropic Claude (claude-haiku-4-5)        |
-| TTS                | Rime Arcana model                          |
+| TTS                | Rime (default: Mist model, configurable)   |
 | Collection data    | MongoDB Atlas (proprietary — not included) |
 
 
@@ -176,6 +176,9 @@ uv run uvicorn app.main:app --reload --port 8000
 uvicorn app.main:app --reload --port 8000
 ```
 
+> If you see inconsistent behavior or no logs, ensure only one process is
+> listening on port 8000 before starting uvicorn.
+
 Verify it's running:
 
 ```bash
@@ -206,6 +209,49 @@ npm run dev
 ```
 
 Open [http://localhost:5173](http://localhost:5173).
+
+---
+
+## Debugging and diagnostics
+
+### Backend pipeline logs
+
+Enable detailed backend timing logs for `/voices`, retrieval, narration, and
+TTS:
+
+```bash
+PIPELINE_DEBUG=true
+LOG_LEVEL=INFO
+```
+
+Optional local error detail in JSON responses:
+
+```bash
+EXPOSE_INTERNAL_ERRORS=true
+```
+
+Restart backend after changing env values.
+
+### Frontend API timing logs
+
+Enable axios request/response timing logs in the browser console:
+
+```bash
+VITE_PIPELINE_DEBUG=true
+```
+
+Restart Vite dev server after changing `.env.local`.
+
+### Port 8000 contention (Windows)
+
+If requests time out and logs do not appear, you may have multiple listeners on
+`127.0.0.1:8000`. Clear the port and run one backend process:
+
+```powershell
+Get-NetTCPConnection -LocalPort 8000 -State Listen | Select-Object -Expand OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force }
+cd c:\Users\kenal\abiqua-voice-rag\backend
+uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --log-level debug --access-log
+```
 
 ---
 
@@ -242,7 +288,8 @@ before narration synthesis.
     "model": ".32 New Departure",
     "serial_range": "143960",
     "year_start": 1905,
-    "confidence": 1.0
+    "confidence": 1.0,
+    "record_url": "https://theabiquacollection.com/f/fbGhMSuH"
   },
   "collections_hit": ["firearms_direct_lookup"],
   "latency_ms": 3862
@@ -274,7 +321,7 @@ Serial number `143960` exercises the full pipeline end to end:
 
 - **Record:** .32 New Departure 2nd Model, 1905, nickel finish
 - **Retrieval path:** `firearms_direct_lookup` (deterministic serial match)
-- **Audio:** ~875 KB synthesized mp3, Rime Arcana model, voice: colby
+- **Audio:** ~875 KB synthesized mp3, Rime Mist model, voice: abbie
 - **Images:** 4 archival images
 - **Pipeline latency:** ~3.8s (sync retrieval, pre-streaming)
 

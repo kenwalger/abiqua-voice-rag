@@ -1,0 +1,293 @@
+The Abiqua Collection
+Voice RAG System — React Frontend Specification
+Spec version 1.0  ·  Component: Frontend  ·  Status: Draft
+Overview
+This document specifies the React frontend for the Abiqua Collection Voice RAG system. It covers the project scaffold, component architecture, TypeScript types mirroring the FastAPI response envelope, state management, audio playback, UI surface, environment configuration, and the demo interaction flow.
+
+The frontend is a single-page application built with Vite + React + TypeScript. It has one primary interaction: accept a query, submit it to the FastAPI backend, and present the narration audio alongside supporting context — narration text, source metadata, images, and latency. No routing, no authentication, no persistence.
+
+Design intentThe UI should look deliberate and museum-quality, not like a generic chatbot. Dark background, serif or semi-serif typography for narration text, muted earth tones consistent with the provenance domain. The visual register should signal that this is a serious archival tool, not a demo toy. Tailwind CSS handles utility styling; a small theme file establishes the palette.
+Project Scaffold
+Initialize
+npm create vite@latest abiqua-voice -- --template react-ts
+cd abiqua-voice
+npm install
+
+Additional dependencies
+npm install axios
+
+Axios is the only non-dev runtime dependency added beyond the Vite + React + TypeScript baseline. It provides cleaner error handling than fetch for the single API call this app makes. No component library, no state management library, no router — React useState and useEffect are sufficient for this scope.
+
+Dev dependencies
+npm install -D tailwindcss @tailwindcss/vite
+
+Tailwind setup
+Add the Tailwind Vite plugin to vite.config.ts:
+
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+import tailwindcss from '@tailwindcss/vite'
+
+export default defineConfig({
+  plugins: [react(), tailwindcss()],
+})
+
+Add the Tailwind import to src/index.css:
+
+@import 'tailwindcss';
+
+Environment Configuration
+All environment variables are prefixed with VITE_ per Vite convention. Create a .env.local file in the project root — this file is gitignored by default.
+
+# .env.local
+VITE_API_BASE_URL=http://localhost:8000
+
+VariableDescriptionVITE_API_BASE_URLBase URL of the FastAPI backend. Points to localhost:8000 in development. In production, set to the deployed API URL. Never hardcode this in source.
+TypeScript Types
+All types are defined in src/types/api.ts. They mirror the FastAPI response envelope exactly. If the API contract changes, update this file first — TypeScript will surface every affected component.
+
+// src/types/api.ts
+
+export interface ImageRef {
+  image_id: string;
+  url: string;
+  caption: string | null;
+  primary: boolean;
+}
+
+export interface SourceMeta {
+  model: string;
+  serial_range: string;
+  year_start: number | null;
+  year_end: number | null;
+  record_count: number;
+  confidence: number;
+}
+
+export interface QueryResponse {
+  narration_text: string;
+  audio_b64: string;
+  audio_mime: string;
+  image_count: number;
+  image_refs: ImageRef[];
+  source_meta: SourceMeta;
+  query_echo: string;
+  latency_ms: number;
+}
+
+export interface Voice {
+  id: string;
+  name: string;
+  preview_url: string | null;
+}
+
+export interface ApiError {
+  ok: false;
+  status: number;
+  error: string;
+  detail: string;
+}
+
+Component Architecture
+The component tree is deliberately flat. There is no context provider, no Redux store, no prop drilling beyond one level. App.tsx holds all state; child components receive props and emit callbacks.
+
+ComponentFileResponsibilityAppsrc/App.tsxRoot. Holds all state. Orchestrates API calls. Passes data down to child components.QueryFormsrc/components/QueryForm.tsxQuery input field, voice selector dropdown, submit button. Emits onSubmit(query, voiceId).AudioPlayersrc/components/AudioPlayer.tsxDecodes base64 audio and plays via HTML audio element. Shows play/pause, elapsed time. Emits nothing.NarrationPanelsrc/components/NarrationPanel.tsxDisplays narration_text in styled prose. Shown alongside audio player.MetadataPanelsrc/components/MetadataPanel.tsxDisplays source_meta fields and latency_ms in a structured card.ImageGallerysrc/components/ImageGallery.tsxRenders image_refs as thumbnails. Clicking a thumbnail opens a larger view. Shows image_count in heading.StatusBarsrc/components/StatusBar.tsxShows loading state, error messages, and query_echo. Single line at top of results area.
+Simplicity noteResist the urge to split further. Seven components is the right ceiling for this scope. Cursor will scaffold these correctly from the spec — additional abstraction layers add complexity without adding clarity for a demo-scale application.
+App State
+All state lives in App.tsx as individual useState hooks. No reducer, no context. The state shape maps directly to what the UI needs to render.
+
+// src/App.tsx — state declarations
+const [query, setQuery]           = useState<string>('')
+const [voiceId, setVoiceId]       = useState<string>('')
+const [voices, setVoices]         = useState<Voice[]>([])
+const [response, setResponse]     = useState<QueryResponse | null>(null)
+const [loading, setLoading]       = useState<boolean>(false)
+const [error, setError]           = useState<string | null>(null)
+
+State transitions
+TransitionDescriptionOn mountFetch GET /voices. Populate voices state. Set voiceId to first result. If fetch fails, voices remains empty and voice selector is hidden.On submitSet loading: true, error: null, response: null. POST /query with query and voiceId. On success: set response, loading: false. On error: set error message, loading: false.On new queryPrevious response remains visible until new response arrives. This prevents jarring blank states during sequential queries.On errorStatusBar displays error.detail from the API error envelope, or a generic message for network failures. Response is cleared.
+API Layer
+All API calls are in src/api/client.ts. No API call logic lives in components. This makes it trivial to swap the base URL, add auth headers, or mock responses for testing.
+
+// src/api/client.ts
+import axios from 'axios'
+import type { QueryResponse, Voice } from '../types/api'
+
+const BASE = import.meta.env.VITE_API_BASE_URL
+
+export async function submitQuery(
+  query: string,
+  voiceId: string,
+  topK = 5,
+): Promise<QueryResponse> {
+  const { data } = await axios.post<QueryResponse>(
+    `${BASE}/query`,
+    { query, voice_id: voiceId || undefined, top_k: topK },
+  )
+  return data
+}
+
+export async function fetchVoices(): Promise<Voice[]> {
+  const { data } = await axios.get<{ voices: Voice[] }>(`${BASE}/voices`)
+  return data.voices
+}
+
+Audio Playback
+The AudioPlayer component receives audio_b64 and audio_mime as props. It constructs a data URI and assigns it to an HTML audio element. Playback begins automatically when a new response arrives.
+
+// src/components/AudioPlayer.tsx
+import { useEffect, useRef } from 'react'
+
+interface Props {
+  audio_b64: string
+  audio_mime: string
+}
+
+export function AudioPlayer({ audio_b64, audio_mime }: Props) {
+  const audioRef = useRef<HTMLAudioElement>(null)
+  const src = `data:${audio_mime};base64,${audio_b64}`
+
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.load()
+      audioRef.current.play().catch(() => {
+        // Autoplay blocked — user must press play manually
+        // This is expected on first interaction in some browsers
+      })
+    }
+  }, [audio_b64])
+
+  return (
+    <audio
+      ref={audioRef}
+      controls
+      className='w-full mt-2'
+      src={src}
+    />
+  )
+}
+
+Autoplay noteBrowsers block autoplay without prior user interaction on the page. The first query submission is itself a user interaction, so autoplay should succeed in practice. The catch block silently handles the rare case where it does not — the audio element controls remain visible and the user can press play manually. Do not show an error for autoplay failures.
+Production noteBase64 data URIs do not support the audio seek bar's time scrubbing in all browsers, and cannot be streamed. Production path: return a presigned CDN URL from the API and set the audio src directly to that URL. This enables seeking, reduces page memory footprint, and allows the browser to start playback before the full file is downloaded.
+Component Specifications
+QueryForm
+Renders a text input, a voice selector, and a submit button. Disabled while loading is true. The voice selector is hidden if the voices array is empty (e.g. if the /voices fetch failed on mount).
+
+PropDescriptiononSubmit(query: string, voiceId: string) => void. Called when the form is submitted. Parent handles API call.voicesVoice[]. Populates the voice selector options.voiceIdstring. Currently selected voice ID. Controlled by parent.setVoiceId(id: string) => void. Updates selected voice in parent state.loadingboolean. Disables submit button and input when true.
+The submit button label alternates between 'Narrate' (idle) and 'Narrating...' (loading). Keyboard submit via Enter key on the input field triggers onSubmit.
+
+AudioPlayer
+Receives audio_b64 and audio_mime. Renders a native HTML audio element with controls. Auto-plays when audio_b64 changes. See the Audio Playback section for implementation.
+
+NarrationPanel
+Receives narration_text as a string. Renders it as styled prose. Typography is the most important design decision in this component — use a slightly larger font size (18–20px), generous line height (1.8), and a serif or semi-serif typeface to signal that this is narrated content, not UI chrome.
+
+// src/components/NarrationPanel.tsx
+interface Props { narration_text: string }
+
+export function NarrationPanel({ narration_text }: Props) {
+  return (
+    <div className='mt-4 p-4 rounded-lg bg-stone-900 border border-stone-700'>
+      <p className='text-stone-200 text-lg leading-relaxed font-serif'>
+        {narration_text}
+      </p>
+    </div>
+  )
+}
+
+MetadataPanel
+Displays source_meta fields and latency_ms in a structured card. All fields are optional defensively — render a dash for null values rather than crashing on incomplete records.
+
+Field displayedDescriptionModelsource_meta.modelSeriesDerived from query_echo if available, otherwise omitted.Serial rangesource_meta.serial_rangeProductionsource_meta.year_start to source_meta.year_end, e.g. '1887 – 1940'. Null years shown as '?'.Records foundsource_meta.record_countConfidencesource_meta.confidence formatted as a percentage, e.g. '91%'.Latencylatency_ms formatted as seconds to one decimal, e.g. '1.8s'. Shown with a label 'Pipeline latency' to invite the production conversation.
+ImageGallery
+Renders image_refs as a horizontal strip of thumbnails below the metadata panel. The primary image (primary: true) is shown first and at slightly larger size. Clicking any thumbnail opens it in a simple lightbox — a fixed overlay with the full-size image and a close button.
+
+PropDescriptionimage_refsImageRef[]. Array of image reference objects from the API response.image_countnumber. Used in the section heading: 'Images (4)'. Displayed even before images load.
+If image_count is 0, the ImageGallery renders nothing — not an empty state, not a placeholder. The absence of the section is itself informative.
+
+Demo tipSerial 143960 has four images. Use this record for your primary demo run so the image gallery is populated. The narration will close with 'There are 4 images available to view' and the gallery will appear immediately below, creating a natural visual confirmation of what the voice just said.
+StatusBar
+A single line above the results area. Shows one of three states at any time:
+
+StateDescriptionLoadingAnimated ellipsis or spinner with text 'Retrieving and synthesizing...' Appears immediately on submit.ErrorError message from the API error envelope, or 'Something went wrong — check the console' for unexpected failures. Shown in amber to avoid alarming red on a demo.EchoAfter a successful response: 'Query: {query_echo}' in muted text. Confirms what the system understood and gives a natural talking point if the query was natural language.
+Page Layout
+The application is a single column, centered, maximum width 800px. Dark background throughout. The layout stacks vertically in this order:
+
+• Header — collection name and a one-line description
+• QueryForm — query input, voice selector, submit button
+• StatusBar — loading / error / echo state
+• AudioPlayer — visible only when response is present
+• NarrationPanel — visible only when response is present
+• MetadataPanel — visible only when response is present
+• ImageGallery — visible only when image_count > 0
+
+The header is minimal — the collection name in a clean typeface, a one-sentence description. No navigation, no footer, no sidebar. The interface is the query.
+
+Tailwind color palette for this build
+RoleDescriptionPage backgroundbg-stone-950Panel backgroundsbg-stone-900Panel bordersborder-stone-700Primary texttext-stone-100Secondary texttext-stone-400Narration texttext-stone-200 font-serif text-lg leading-relaxedAccent / buttonbg-amber-700 hover:bg-amber-600 text-stone-100Error texttext-amber-400Metadata labelstext-stone-500 text-sm uppercase tracking-wide
+Demo noteStone and amber against a near-black background reads as intentional and archival — consistent with the provenance domain. It also photographs well on camera, which matters for the video. Avoid pure white backgrounds, which blow out under recording lighting.
+Demo Interaction Flow
+This is the intended sequence for the demo video. Spec it here so Cursor builds the UX to support it exactly.
+
+StepDescription1 — Page loadsHeader and QueryForm are visible. Voice selector is populated from /voices. No results area is shown yet.2 — User types queryInput field accepts natural language or serial number. Example: 'tell me about the 1905 New Departure shipped to China' or simply '143960'.3 — User submitsSubmit button clicked or Enter pressed. StatusBar shows 'Retrieving and synthesizing...' Query form remains visible but disabled.4 — Response arrivesStatusBar updates to echo the query. AudioPlayer appears and begins playing automatically. NarrationPanel fades in with the narration text. MetadataPanel and ImageGallery appear below.5 — Audio playsThe narration audio plays. The text is visible alongside. Images are visible in the gallery. Latency is shown in MetadataPanel.6 — Follow-up queryUser types a new query. Previous results remain visible until new response arrives. Prevents blank state between queries.
+File Structure
+abiqua-voice/
+??? .env.local                 # VITE_API_BASE_URL — gitignored
+??? index.html
+??? vite.config.ts
+??? tsconfig.json
+??? package.json
+??? src/
+    ??? main.tsx
+    ??? App.tsx                # Root component, all state
+    ??? index.css              # Tailwind import
+    ??? api/
+    ?   ??? client.ts          # submitQuery(), fetchVoices()
+    ??? types/
+    ?   ??? api.ts             # TypeScript interfaces
+    ??? components/
+        ??? QueryForm.tsx
+        ??? AudioPlayer.tsx
+        ??? NarrationPanel.tsx
+        ??? MetadataPanel.tsx
+        ??? ImageGallery.tsx
+        ??? StatusBar.tsx
+
+Instructions for Cursor
+When handing this spec to Cursor, use the following prompt structure for best results:
+
+Implement the React frontend described in this spec document.
+
+Constraints:
+- Vite + React + TypeScript. No other frameworks.
+- Tailwind CSS for all styling. No CSS modules, no styled-components.
+- Axios for API calls. No fetch().
+- All state in App.tsx. No Context, no Redux.
+- No routing. Single page only.
+- TypeScript interfaces must match src/types/api.ts exactly as specified.
+- Do not add dependencies not listed in this spec.
+
+Implement components in this order:
+1. src/types/api.ts — interfaces first
+2. src/api/client.ts — API layer
+3. src/components/StatusBar.tsx
+4. src/components/AudioPlayer.tsx
+5. src/components/NarrationPanel.tsx
+6. src/components/MetadataPanel.tsx
+7. src/components/ImageGallery.tsx
+8. src/components/QueryForm.tsx
+9. src/App.tsx — wire everything together
+
+Implementing in dependency order (leaf components first, App last) prevents Cursor from making assumptions about props and interfaces before they are defined. It also makes each step independently verifiable.
+
+Production Callouts
+Audio streamingDemo: full base64 mp3 received before playback begins. Production: streaming audio delivery via a presigned CDN URL or chunked SSE. The AudioPlayer component needs only a src prop change — the HTML audio element handles streaming natively once given a real URL rather than a data URI.
+Waveform visualizerDemo: native HTML audio controls. Production: replace the audio element with a Web Audio API visualization using an AnalyserNode to render a live waveform. This is a significant visual upgrade for the demo video if time permits — a waveform animating in sync with the narration is memorable on camera.
+Mobile layoutDemo: single-column 800px max-width, desktop-only. Production: the Tailwind classes are chosen to be responsive-ready. Adding sm: and md: breakpoint prefixes to the layout classes achieves a usable mobile layout with minimal rework.
+Query historyDemo: no history. Production: persist query/response pairs to localStorage (keyed by session) and display as a scrollable sidebar. Enables the 'compare two variants of the same model' use case that collectors would actually use.
+Component Dependencies
+• FastAPI Routes Spec — defines the /query and /voices response envelopes that src/types/api.ts mirrors
+• Rime TTS Integration Spec — defines audio_b64 and audio_mime fields consumed by AudioPlayer
+• MongoDB Atlas Spec — defines image_refs structure consumed by ImageGallery
+
+The Abiqua Collection Voice RAG System  ·  React Frontend Spec v1.0  ·  Draft

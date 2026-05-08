@@ -1,24 +1,95 @@
+import logging
+import sys
 import time
+import traceback
+from contextlib import asynccontextmanager
+from functools import lru_cache
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, status
-from fastapi.exceptions import RequestValidationError
+from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
-from app.orchestrator import run_query
+from app.pipeline_log import log as pipe_log
 from app.rime import get_voices, synthesize
 from app.settings import get_settings
 
+
+@lru_cache(maxsize=1)
+def _run_query_fn():
+    """Defer importing orchestrator (Mongo + LlamaIndex) until first /query — keeps /voices fast."""
+    from app.orchestrator import run_query
+
+    return run_query
+
+
+logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+def _configure_logging_early() -> None:
+    """Ensure stderr logging works even when uvicorn configures logging first."""
+    level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
+    try:
+        logging.basicConfig(
+            level=level,
+            format="%(levelname)s [%(name)s] %(message)s",
+            force=True,
+        )
+    except TypeError:
+        logging.basicConfig(
+            level=level,
+            format="%(levelname)s [%(name)s] %(message)s",
+        )
+    logging.getLogger("pymongo").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logger.setLevel(level)
+    if settings.PIPELINE_DEBUG:
+        _pl = logging.getLogger("abiqua.pipeline")
+        _pl.setLevel(logging.INFO)
+        if not _pl.handlers:
+            _h = logging.StreamHandler(sys.stderr)
+            _h.setFormatter(
+                logging.Formatter("%(levelname)s [%(name)s] %(message)s"),
+            )
+            _pl.addHandler(_h)
+        _pl.propagate = False
+
+
+_configure_logging_early()
+
+
+def _public_error_detail(exc: BaseException) -> str | list[Any]:
+    if settings.EXPOSE_INTERNAL_ERRORS:
+        return f"{type(exc).__name__}: {exc}"
+    return "An unexpected error occurred."
+
+
 VOICES_CACHE: dict[str, Any] = {"expires_at": 0.0, "data": {"voices": []}}
 VOICES_CACHE_TTL_SECONDS = 300
+
+
+def cors_headers_for_request(request: Request) -> dict[str, str]:
+    """Mirror CORSMiddleware ACAO so error bodies are readable from the browser."""
+    origin = request.headers.get("origin")
+    if not origin or origin not in settings.ALLOWED_ORIGINS:
+        return {}
+    return {
+        "access-control-allow-origin": origin,
+        "access-control-allow-credentials": "false",
+    }
 
 
 class QueryRequest(BaseModel):
     query: str = Field(..., min_length=2, max_length=500)
     voice_id: str | None = None
+    voice_model_id: str | None = Field(
+        default=None,
+        description="Rime model (e.g. mist, arcana). Must match the selected voice id.",
+    )
     top_k: int = Field(default=5, ge=1, le=20)
 
     @field_validator("query")
@@ -44,6 +115,8 @@ class SourceMeta(BaseModel):
     year_end: int | None
     record_count: int
     confidence: float
+    short_url: str | None = None
+    record_url: str | None = None
 
 
 class QueryResponse(BaseModel):
@@ -70,14 +143,16 @@ class ApiError(BaseModel):
     detail: Any
 
 
-app = FastAPI(title="Abiqua Collection Voice RAG API", version="1.0.0")
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    _configure_logging_early()
+    yield
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=settings.ALLOWED_ORIGINS,
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
+
+app = FastAPI(
+    title="Abiqua Collection Voice RAG API",
+    version="1.0.0",
+    lifespan=lifespan,
 )
 
 
@@ -92,22 +167,60 @@ async def error_envelope_middleware(request: Request, call_next):
             error="http_error",
             detail=exc.detail,
         )
-        return JSONResponse(status_code=exc.status_code, content=payload.model_dump())
-    except Exception:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=payload.model_dump(),
+            headers=cors_headers_for_request(request),
+        )
+    except Exception as exc:
+        logger.exception("Unhandled error in error_envelope_middleware")
+        traceback.print_exc(file=sys.stderr)
         payload = ApiError(
             status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             error="internal_server_error",
-            detail="An unexpected error occurred.",
+            detail=_public_error_detail(exc),
         )
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content=payload.model_dump(),
+            headers=cors_headers_for_request(request),
         )
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    """Route exceptions never reach HTTP middleware; log here so the terminal shows the cause."""
+    logger.exception("Unhandled exception during request")
+    traceback.print_exc(file=sys.stderr)
+    payload = ApiError(
+        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        error="internal_server_error",
+        detail=_public_error_detail(exc),
+    )
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content=payload.model_dump(),
+        headers=cors_headers_for_request(request),
+    )
+
+
+@app.exception_handler(ResponseValidationError)
+async def response_validation_handler(request: Request, exc: ResponseValidationError):
+    logger.exception("response_model_validation_failed")
+    payload = ApiError(
+        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        error="response_validation_error",
+        detail=exc.errors(),
+    )
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content=payload.model_dump(),
+        headers=cors_headers_for_request(request),
+    )
 
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    _ = request
     payload = ApiError(
         status=status.HTTP_400_BAD_REQUEST,
         error="validation_error",
@@ -116,7 +229,19 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
         content=payload.model_dump(),
+        headers=cors_headers_for_request(request),
     )
+
+
+# Registered after custom HTTP middleware so CORS wraps all responses (including
+# JSON from error_envelope_middleware) — otherwise some error paths lack ACAO.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.ALLOWED_ORIGINS,
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 async def ping_atlas() -> str:
@@ -130,18 +255,48 @@ async def ping_rime() -> str:
 @app.post("/query", response_model=QueryResponse)
 async def query_endpoint(payload: QueryRequest):
     start_time = time.time()
+    print(
+        f"[debug] entered /query query='{payload.query[:80]}' top_k={payload.top_k}",
+        flush=True,
+    )
+    pipe_log(
+        "/query start q_preview=%s voice_id=%s voice_model_id=%s top_k=%s",
+        (payload.query[:120] + "…") if len(payload.query) > 120 else payload.query,
+        payload.voice_id,
+        payload.voice_model_id,
+        payload.top_k,
+    )
 
-    rag_result = await run_query(payload.query, payload.top_k)
+    t_rag = time.perf_counter()
+    rag_result = await _run_query_fn()(payload.query, payload.top_k)
+    pipe_log(
+        "/query rag_complete elapsed_ms=%.1f query_type=%s chunks_collections=%s",
+        (time.perf_counter() - t_rag) * 1000,
+        rag_result.query_type,
+        rag_result.collections_hit,
+    )
     try:
-        tts_result = await synthesize(rag_result.narration_text, payload.voice_id)
+        t_tts = time.perf_counter()
+        tts_result = await synthesize(
+            rag_result.narration_text,
+            payload.voice_id,
+            payload.voice_model_id,
+        )
+        pipe_log(
+            "/query tts_complete elapsed_ms=%.1f speaker=%s model=%s audio_b64_len=%s",
+            (time.perf_counter() - t_tts) * 1000,
+            tts_result.speaker,
+            tts_result.model_id,
+            len(tts_result.audio_b64),
+        )
     except RuntimeError as exc:
         message = str(exc)
-        if message.startswith("rime_api_error:") or message.startswith("rime_unreachable:"):
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=message,
-            ) from exc
-        raise
+        pipe_log("/query tts_failed %s", message[:500])
+        logger.warning("rime_synthesize_failed: %s", message)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=message,
+        ) from exc
 
     latency_ms = int((time.time() - start_time) * 1000)
 
@@ -184,21 +339,37 @@ async def ready() -> JSONResponse:
 @app.get("/voices", response_model=VoicesResponse)
 async def voices() -> VoicesResponse:
     now = time.time()
+    t_req = time.perf_counter()
+    print("[debug] entered /voices", flush=True)
     if VOICES_CACHE["expires_at"] > now:
+        n = len(VOICES_CACHE["data"].get("voices", []))
+        pipe_log("GET /voices cache_hit voices=%s elapsed_ms=%.1f", n, (time.perf_counter() - t_req) * 1000)
         return VoicesResponse(voices=VOICES_CACHE["data"]["voices"])
 
+    pipe_log("GET /voices cache_miss fetching")
     try:
         voices_data = await get_voices()
     except RuntimeError as exc:
         message = str(exc)
         if message.startswith("rime_api_error:") or message.startswith("rime_unreachable:"):
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=message,
-            ) from exc
+            # Degraded mode: keep 200 so the UI loads; TTS still uses RIME_DEFAULT_VOICE.
+            logger.warning("voices_unavailable_using_empty_list: %s", message)
+            pipe_log(
+                "GET /voices degraded_empty_list reason=%s elapsed_ms=%.1f",
+                message[:200],
+                (time.perf_counter() - t_req) * 1000,
+            )
+            return VoicesResponse(voices=[])
+        pipe_log("GET /voices error %s", message[:300])
         raise
 
+    raw_list = voices_data.get("voices", [])
     VOICES_CACHE["data"] = voices_data
     VOICES_CACHE["expires_at"] = now + VOICES_CACHE_TTL_SECONDS
-    return VoicesResponse(voices=voices_data.get("voices", []))
+    pipe_log(
+        "GET /voices ok voices=%s elapsed_ms=%.1f",
+        len(raw_list),
+        (time.perf_counter() - t_req) * 1000,
+    )
+    return VoicesResponse(voices=raw_list)
 
