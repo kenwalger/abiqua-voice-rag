@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import json
 from io import BytesIO
@@ -27,88 +26,65 @@ def make_mock_response(body: bytes) -> MagicMock:
 
 
 class TestSynthesize:
-    def test_returns_rime_result(self) -> None:
-        async def _run() -> RimeResult:
-            with patch(
-                "urllib.request.urlopen",
-                return_value=make_mock_response(FAKE_MP3),
-            ):
-                return await synthesize("The New Departure was produced in 1887.")
-
-        result = asyncio.run(_run())
+    async def test_returns_rime_result(self) -> None:
+        with patch(
+            "urllib.request.urlopen",
+            return_value=make_mock_response(FAKE_MP3),
+        ):
+            result = await synthesize("The New Departure was produced in 1887.")
         assert isinstance(result, RimeResult)
         assert result.audio_mime == "audio/mpeg"
         assert result.char_count > 0
 
-    def test_audio_b64_round_trips(self) -> None:
-        async def _run() -> RimeResult:
-            with patch(
-                "urllib.request.urlopen",
-                return_value=make_mock_response(FAKE_MP3),
-            ):
-                return await synthesize("Test.")
-
-        result = asyncio.run(_run())
+    async def test_audio_b64_round_trips(self) -> None:
+        with patch(
+            "urllib.request.urlopen",
+            return_value=make_mock_response(FAKE_MP3),
+        ):
+            result = await synthesize("Test.")
         raw = base64.b64decode(result.audio_b64)
         assert raw.startswith(b"ID3")
         assert raw.endswith(FAKE_MP3)
 
-    def test_uses_default_voice(self) -> None:
-        async def _run() -> RimeResult:
-            with patch(
-                "urllib.request.urlopen",
-                return_value=make_mock_response(FAKE_MP3),
-            ):
-                return await synthesize("Test.", speaker=None)
-
-        result = asyncio.run(_run())
+    async def test_uses_default_voice(self) -> None:
+        with patch(
+            "urllib.request.urlopen",
+            return_value=make_mock_response(FAKE_MP3),
+        ):
+            result = await synthesize("Test.", speaker=None)
         assert result.speaker == DEFAULT_VOICE
 
-    def test_uses_provided_speaker(self) -> None:
-        async def _run() -> RimeResult:
-            with patch(
-                "urllib.request.urlopen",
-                return_value=make_mock_response(FAKE_MP3),
-            ):
-                return await synthesize("Test.", speaker="grove")
-
-        result = asyncio.run(_run())
+    async def test_uses_provided_speaker(self) -> None:
+        with patch(
+            "urllib.request.urlopen",
+            return_value=make_mock_response(FAKE_MP3),
+        ):
+            result = await synthesize("Test.", speaker="grove")
         assert result.speaker == "grove"
 
-    def test_401_raises_api_error(self) -> None:
+    async def test_401_raises_api_error(self) -> None:
         fp = BytesIO(b'{"error": "invalid_api_key"}')
         err = HTTPError("", 401, "Unauthorized", MagicMock(), fp)
-
-        async def _run() -> None:
+        with pytest.raises(RuntimeError) as exc:
             with patch("urllib.request.urlopen", side_effect=err):
                 await synthesize("Test.")
-
-        with pytest.raises(RuntimeError) as exc:
-            asyncio.run(_run())
         assert "rime_api_error:401" in str(exc.value)
 
-    def test_429_raises_api_error(self) -> None:
+    async def test_429_raises_api_error(self) -> None:
         fp = BytesIO(b'{"error": "rate_limit"}')
         err = HTTPError("", 429, "Too Many Requests", MagicMock(), fp)
-
-        async def _run() -> None:
+        with pytest.raises(RuntimeError) as exc:
             with patch("urllib.request.urlopen", side_effect=err):
                 await synthesize("Test.")
-
-        with pytest.raises(RuntimeError) as exc:
-            asyncio.run(_run())
         assert "rime_api_error:429" in str(exc.value)
 
-    def test_url_error_raises_unreachable(self) -> None:
-        async def _run() -> None:
+    async def test_url_error_raises_unreachable(self) -> None:
+        with pytest.raises(RuntimeError) as exc:
             with patch(
                 "urllib.request.urlopen",
                 side_effect=URLError("Connection refused"),
             ):
                 await synthesize("Test.")
-
-        with pytest.raises(RuntimeError) as exc:
-            asyncio.run(_run())
         assert "rime_unreachable" in str(exc.value)
 
 
@@ -135,24 +111,17 @@ class TestCleanNarration:
 
 
 class TestGetVoices:
-    def test_returns_voice_list(self) -> None:
+    async def test_returns_voice_list(self) -> None:
         fake = [{"id": "colby", "name": "Colby", "preview_url": None}]
         mock_resp = make_mock_response(json.dumps(fake).encode())
-
-        async def _run() -> dict:
-            with patch("urllib.request.urlopen", return_value=mock_resp):
-                return await get_voices()
-
-        result = asyncio.run(_run())
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            result = await get_voices()
         assert result == {"voices": fake}
 
-    def test_raises_on_network_failure(self) -> None:
-        async def _run() -> None:
+    async def test_raises_on_network_failure(self) -> None:
+        with pytest.raises(RuntimeError):
             with patch(
                 "urllib.request.urlopen",
                 side_effect=URLError("Name resolution failed"),
             ):
                 await get_voices()
-
-        with pytest.raises(RuntimeError):
-            asyncio.run(_run())

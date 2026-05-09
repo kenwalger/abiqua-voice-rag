@@ -10,11 +10,18 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added (2026-05 Updates)
+- Filled out `docs/examples/sample_document.json` with field descriptions
+  for the firearms parent document schema
 - Test suite: 44 tests across four files with zero external API
-  dependencies (test_classification.py, test_schema.py, test_rime.py,
-  test_cost.py)
-- pytest.ini, dev dependencies (pytest, pytest-asyncio, httpx)
-- test_smoke.py skips gracefully when API key env vars are absent
+  dependencies (`test_classification.py`, `test_schema.py`,
+  `test_rime.py`, `test_cost.py`)
+- Pytest configuration in `backend/pyproject.toml`
+  (`[tool.pytest.ini_options]`): `asyncio_mode = "auto"`,
+  `addopts = "-p asyncio"` (loads pytest-asyncio when
+  `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`), `pythonpath`, `testpaths`
+- Dev dependencies: `pytest`, `pytest-asyncio`, `httpx`
+- `test_smoke.py` skips inside the test body when required API key env vars
+  are absent (avoids pytest exit code 5 from zero collected tests)
 - Opt-in pipeline diagnostics:
   - Backend `PIPELINE_DEBUG` flag with `[pipeline]` timing logs for `/voices`,
     retrieval, Anthropic narration, and TTS phases.
@@ -83,9 +90,11 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   - Lifespan logs and continues if retriever initialization fails (e.g. bad
     `MONGODB_URI`), so `/health` and `/ready` still respond with accurate
     degraded status instead of hanging startup.
-- Backend tests: `pytest` added as a uv dev-dependency, `tests/test_smoke.py`,
-  and `[tool.pytest.ini_options]` (`pythonpath`, `testpaths`) so
-  `uv run pytest -v` uses the project venv without global plugin conflicts.
+- Backend tests: consolidated pytest settings into a single
+  `[tool.pytest.ini_options]` table in `backend/pyproject.toml`; removed
+  redundant `backend/pytest.ini` to avoid split configuration.
+- `test_rime.py` uses native `async def` tests with `await` (pytest-asyncio
+  auto mode) instead of `asyncio.run()` wrappers.
 - Frontend: when `VITE_PIPELINE_DEBUG` is true, Vite HMR `dispose` clears axios
   pipeline interceptors so they do not accumulate across reloads.
 - `/voices` voice catalog caching now uses **`asyncio.Lock`** and
@@ -124,13 +133,10 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **`AudioPlayer`**: effect cleanup now **pauses only** on unmount / before
   `audio_b64` updates—**no longer clears `src`** in cleanup, which had raced
   React’s controlled `data:` URL and prevented playback after new queries.
-- **CI smoke test**: `tests/test_smoke.py` uses module-level
-  `pytest.skip(..., allow_module_level=True)` when required API keys are missing
-  from **`os.environ`**; `tests/test_collects.py` ensures at least one test is
-  still collected when smoke is skipped (avoids pytest exit code 5 with zero
-  collected tests).
-
-
+- **CI smoke test**: `tests/test_smoke.py` calls `pytest.skip()` at the start of
+  `test_fastapi_app_metadata` when required API keys are missing from
+  **`os.environ`**, so one test is always collected and the run exits cleanly
+  (skipped, not exit code 5).
 
 
 

@@ -29,5 +29,9 @@ dev-dependencies = [
 ]
 
 [tool.pytest.ini_options]
+addopts = "-p asyncio"
 asyncio_mode = "auto"
 pythonpath = ["."]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]

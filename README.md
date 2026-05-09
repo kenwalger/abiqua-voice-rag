@@ -460,6 +460,12 @@ uv sync
 uv run pytest -v
 ```
 
+Pytest is configured under `[tool.pytest.ini_options]` in
+`backend/pyproject.toml`: `asyncio_mode = "auto"` for native `async def`
+tests, and `addopts = "-p asyncio"` so the asyncio plugin still loads when
+plugin autoload is turned off (see below). There is no separate
+`backend/pytest.ini`.
+
 If a globally installed `pytest` pulls incompatible plugins on your machine,
 run with plugin autoload disabled:
 
@@ -470,6 +476,24 @@ $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD='1'; uv run pytest -v
 
 End-to-end tests against live Atlas and Rime APIs are excluded from CI. The
 full pipeline is validated manually using the demo query.
+
+---
+
+## Troubleshooting
+
+**PowerShell JSON quoting**
+On Windows PowerShell, the curl -d flag mangles single-quoted JSON.
+Use a variable or file instead:
+
+```powershell
+$body = '{"query": "143960"}'
+curl -X POST http://localhost:8000/query `
+  -H "Content-Type: application/json" `
+  -d $body
+```
+
+Or save the body to a file and use --data-binary "@body.json".
+
 
 ---
 
