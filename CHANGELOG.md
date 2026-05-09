@@ -9,6 +9,14 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Added test coverage for _HASH_SERIAL_IN_MIXED regex path
+  (CLS-11, CLS-12): '#91000 nickel finish' correctly routes
+  to serial_number and extracts '91000'
+- `tests/test_classification.py` now contains 12 classification/extraction
+  tests (up from 10), including mixed hash-serial routing and extraction
+- `backend/pyproject.toml` now ends with a trailing newline (`0a`) for
+  POSIX text-file compatibility checks
+
 ### Added (2026-05 Updates)
 - Filled out `docs/examples/sample_document.json` with field descriptions
   for the firearms parent document schema

@@ -29,8 +29,14 @@ class TestClassification:
     def test_mixed_query_with_serial(self) -> None:
         assert classify_query("serial 143960 nickel finish") == "serial_number"
 
+    def test_hash_serial_in_mixed_query(self) -> None:
+        assert classify_query("#91000 nickel finish") == "serial_number"
+
     def test_extract_from_word_prefix(self) -> None:
         assert extract_serial_number("serial 143960") == "143960"
+
+    def test_extract_hash_serial_from_mixed(self) -> None:
+        assert extract_serial_number("#91000 nickel finish") == "91000"
 
     def test_extract_from_bare(self) -> None:
         assert extract_serial_number("143960") == "143960"

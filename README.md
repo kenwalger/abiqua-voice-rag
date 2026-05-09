@@ -448,7 +448,7 @@ The suite covers four high-impact areas without live API calls:
 
 | Category | File | Tests | What it validates |
 | --- | --- | --- | --- |
-| Query classification | `test_classification.py` | 10 | Serial vs. natural language routing |
+| Query classification | `test_classification.py` | 12 | Serial vs. natural language routing |
 | Schema contracts | `test_schema.py` | 14 | Request validation, response envelope, Cognitive Budget model |
 | Rime integration | `test_rime.py` | 13 | Audio synthesis, error mapping, text prep |
 | Cognitive Budget | `test_cost.py` | 7 | Cost calculation correctness and math consistency |
@@ -476,6 +476,11 @@ $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD='1'; uv run pytest -v
 
 End-to-end tests against live Atlas and Rime APIs are excluded from CI. The
 full pipeline is validated manually using the demo query.
+
+Latest local verification snapshot:
+- `uv run pytest tests/test_classification.py -v` -> 12 passed
+- `uv run pytest -v` -> 46 passed, 1 skipped
+- `backend/pyproject.toml` ends with newline byte `0a`
 
 ---
 
