@@ -10,7 +10,11 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ## [Unreleased]
 
 ### Added (2026-05 Updates)
-
+- Test suite: 44 tests across four files with zero external API
+  dependencies (test_classification.py, test_schema.py, test_rime.py,
+  test_cost.py)
+- pytest.ini, dev dependencies (pytest, pytest-asyncio, httpx)
+- test_smoke.py skips gracefully when API key env vars are absent
 - Opt-in pipeline diagnostics:
   - Backend `PIPELINE_DEBUG` flag with `[pipeline]` timing logs for `/voices`,
     retrieval, Anthropic narration, and TTS phases.
@@ -90,6 +94,14 @@ This project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed (2026-05 Updates)
 
+- narration_model now flows from NARRATION_MODEL constant in
+  orchestrator.py through OrchestratorResult into calculate_cost()
+  in main.py — no hardcoded literal in main.py
+- /voices cache logging restored: cache hit/miss distinguishable
+  under PIPELINE_DEBUG via pipe_log()
+- classify_query() extended to detect serial patterns in mixed
+  queries e.g. 'serial 143960 nickel finish' now routes correctly
+  to serial_number path
 - Duplicate voice selector keys caused by repeated model/voice rows from Rime
   catalog flattening.
 - Missing/ambiguous voice selector behavior by adding explicit loading/error

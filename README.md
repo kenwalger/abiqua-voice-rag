@@ -444,6 +444,15 @@ RIME_BASE_URL=https://users.rime.ai
 
 ## Tests
 
+The suite covers four high-impact areas without live API calls:
+
+| Category | File | Tests | What it validates |
+| --- | --- | --- | --- |
+| Query classification | `test_classification.py` | 10 | Serial vs. natural language routing |
+| Schema contracts | `test_schema.py` | 14 | Request validation, response envelope, Cognitive Budget model |
+| Rime integration | `test_rime.py` | 13 | Audio synthesis, error mapping, text prep |
+| Cognitive Budget | `test_cost.py` | 7 | Cost calculation correctness and math consistency |
+
 From the `backend/` directory (uses the uv-managed virtualenv):
 
 ```bash
@@ -458,6 +467,9 @@ run with plugin autoload disabled:
 # PowerShell
 $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD='1'; uv run pytest -v
 ```
+
+End-to-end tests against live Atlas and Rime APIs are excluded from CI. The
+full pipeline is validated manually using the demo query.
 
 ---
 
@@ -475,9 +487,9 @@ This is a demo build. Every shortcut has a documented upgrade path:
 | No caching           | Redis, SHA-256 keyed by query + voice_id   |
 | urllib HTTP client   | httpx.AsyncClient with retry and backoff   |
 | Single collection    | Multi-collection LlamaIndex retrieval      |
+| Hardcoded pricing constants | Live pricing from provider APIs, `PRICING_DATE` makes staleness visible |
 
-
-Full rationale for each decision is in the spec documents under `/docs/specs/`.
+Full rationale for each decision is in the spec documents under `/docs/specs/` and the [Architecture Diagrams](ARCHITECTURE.md).
 
 ---
 

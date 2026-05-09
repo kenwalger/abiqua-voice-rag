@@ -84,7 +84,9 @@ async def get_cached_voices() -> dict[str, Any]:
             _voices_cache is not None
             and time.time() - _voices_cache_time < VOICES_CACHE_TTL
         ):
+            pipe_log("voices cache_hit")
             return _voices_cache
+        pipe_log("voices cache_miss — fetching from Rime")
         result = await get_voices()
         _voices_cache = result
         _voices_cache_time = time.time()
@@ -393,7 +395,7 @@ async def query_endpoint(payload: QueryRequest):
         tts_characters=tts_result.char_count,
         collections_queried=len(rag_result.collections_hit),
         routing_decision=rag_result.query_type,
-        narration_model="claude-haiku-4-5-20251001",
+        narration_model=rag_result.narration_model,
     )
 
     return QueryResponse(

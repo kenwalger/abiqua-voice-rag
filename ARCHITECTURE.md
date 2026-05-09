@@ -18,6 +18,7 @@ flowchart TD
         R[AudioPlayer\nplay base64 mp3]
         S[NarrationPanel\ndisplay narration text]
         T[MetadataPanel\nmodel · year · confidence · latency]
+        U[CognitiveBudgetPanel\ncollapsible cost breakdown\nrouting · tokens · est. USD]
     end
 
     B -->|POST /query| C
@@ -47,7 +48,7 @@ flowchart TD
     subgraph Synthesis ["Stages 4 + 5 — Narration"]
         N --> O[Build narration prompt\nchunk text + parent metadata]
         O --> P[Claude claude-haiku-4-5\nmax_tokens 400 · temp 0.3]
-        P --> Q[narration_text]
+        P --> Q[narration_text + token usage]
     end
 
     subgraph Voice ["Rime TTS — Voice Layer"]
@@ -56,10 +57,11 @@ flowchart TD
         W --> X[base64 mp3\n~875 KB · 22050 Hz]
     end
 
-    X --> Y[Assemble response envelope\nnarration_text · audio_b64\nsource_meta · record_url · latency_ms]
+    X --> Y[Assemble response envelope\nnarration_text · audio_b64\nsource_meta · record_url\ncognitive_budget · latency_ms]
     Y -->|JSON response| R
     Y --> S
     Y --> T
+    Y --> U
 
     style Frontend fill:#1c1917,stroke:#78716c,color:#e7e5e4
     style Backend fill:#1c1917,stroke:#78716c,color:#e7e5e4
@@ -188,6 +190,7 @@ flowchart LR
         D5[No caching\nevery query hits Atlas + Rime]
         D6[urllib.request\nin run_in_executor]
         D7[arcana model\nfull synthesis latency]
+        D8[Hardcoded pricing constants\ndated PRICING_DATE field]
     end
 
     subgraph Production ["Production Upgrade Path"]
@@ -198,6 +201,7 @@ flowchart LR
         P5[Redis cache\nSHA-256 keyed by query + voice]
         P6[httpx.AsyncClient\nconnection pooling + retry]
         P7[mistv3 model\n~70ms time-to-first-audio]
+        P8[Live pricing from provider APIs\nor maintained pricing database\nPRICING_DATE makes staleness visible]
     end
 
     D1 -->|enable streaming| P1
@@ -207,6 +211,7 @@ flowchart LR
     D5 -->|add Redis| P5
     D6 -->|replace HTTP client| P6
     D7 -->|switch modelId| P7
+    D8 -->|fetch live pricing| P8
 
     style Demo fill:#1c1917,stroke:#78716c,color:#e7e5e4
     style Production fill:#0f172a,stroke:#334155,color:#e2e8f0
