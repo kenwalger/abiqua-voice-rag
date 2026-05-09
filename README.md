@@ -1,5 +1,12 @@
 # Abiqua Collection — Voice RAG System
 
+![Python](https://img.shields.io/badge/Python-3.11+-3776ab?logo=python&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-009688?logo=fastapi&logoColor=white)
+![React](https://img.shields.io/badge/React-18-61dafb?logo=react&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-5-3178c6?logo=typescript&logoColor=white)
+![MongoDB](https://img.shields.io/badge/MongoDB-Atlas-47a248?logo=mongodb&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-yellow)
+
 A voice-first provenance research tool built on a real-world dataset: the
 [Abiqua Collection](https://theabiquacollection.com), a digital museum
 documenting the history and provenance of Smith & Wesson revolvers.
