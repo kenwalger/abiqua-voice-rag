@@ -1,0 +1,473 @@
+The Abiqua Collection
+Voice RAG System — Test Suite Specification
+Spec version 1.1  ·  Component: Testing  ·  Status: Draft  ·  Updated: Cognitive Budget, record_url, EXPOSE_INTERNAL_ERRORS
+Overview
+This document specifies the test suite for the Abiqua Collection Voice RAG system. Version 1.1 reflects the current codebase: ImageGallery has been removed, record_url replaces short_url in the response envelope, the Cognitive Budget feature adds pipeline_cost fields to every /query response, and EXPOSE_INTERNAL_ERRORS and PIPELINE_DEBUG settings are now present.
+
+The suite targets four high-impact areas: query classification logic, Pydantic schema contracts, Rime TTS integration error handling, and Cognitive Budget cost calculation correctness. All 37 tests run without live external API calls.
+
+v1.0 changesImageRef schema tests removed (frontend type deleted, backend model retained). SCH-08 updated to test backend Pydantic ImageRef model directly. Added SCH-11 through SCH-14 for record_url, EXPOSE_INTERNAL_ERRORS, and CognitiveBudget. Added COST-01 through COST-07 for pipeline_cost.py. Added RIME-13. Total: 37 tests up from 32.
+Testing Philosophy
+CategoryDescriptionQuery classificationA misclassified query silently returns wrong data with no error raised. Highest-risk silent failure in the pipeline. Most important category to test.Pydantic schema contractsThe FastAPI request/response models are the contract between backend and frontend. Nullable fields, new fields like record_url and cognitive_budget, and error envelopes all need explicit validation.Rime integrationExternal API errors must map to correct HTTP responses. 429 from Rime must return 503. URLError must raise rime_unreachable. Testable with mocked HTTP — no live API calls.Cognitive BudgetCost calculation must be deterministic given known inputs. Pricing constants must produce correct USD values. The daily extrapolation must be mathematically consistent with total_cost_usd.
+Tooling and Setup
+Dependencies
+[dependency-groups]
+dev = [
+    'pytest>=8.0',
+    'pytest-asyncio>=0.23',
+    'httpx>=0.27',
+]
+
+Directory structure
+backend/
+??? tests/
+?   ??? __init__.py
+?   ??? test_classification.py
+?   ??? test_schema.py
+?   ??? test_rime.py
+?   ??? test_cost.py
+?   ??? test_smoke.py  (skipped in keyless CI)
+??? pytest.ini
+??? pyproject.toml
+
+pytest.ini
+[pytest]
+asyncio_mode = auto
+testpaths = tests
+python_files = test_*.py
+python_functions = test_*
+
+Running
+uv run pytest -v                          # all tests
+uv run pytest tests/test_cost.py -v       # cost only
+uv run pytest tests/test_smoke.py -v      # skips without API keys
+
+Category 1 — Query Classification (10 tests)
+Pure unit tests for classify_query() and extract_serial_number() in orchestrator.py. No mocking required. All synchronous.
+
+Prerequisiteclassify_query() and extract_serial_number() must be importable as standalone functions. Verify: uv run python -c "from app.orchestrator import classify_query, extract_serial_number; print('OK')" before implementing these tests.
+Test inventory
+Test IDCategoryWhat it validatesCLS-01ClassificationPlain serial '143960' classifies as serial_numberCLS-02ClassificationHash prefix '#91000' classifies as serial_numberCLS-03ClassificationWord prefix 'serial 45231' classifies as serial_numberCLS-04ClassificationNatural language query classifies as natural_languageCLS-05ClassificationModel name only 'New Departure' classifies as natural_languageCLS-06Classification3-digit string '123' classifies as natural_languageCLS-07Classification10-digit string classifies as natural_language (outside 4-9 range)CLS-08ClassificationMixed 'serial 143960 nickel finish' classifies as serial_numberCLS-09ExtractionSerial extracted correctly from 'serial 143960'CLS-10ExtractionSerial extracted correctly from bare '143960'
+Implementation
+# tests/test_classification.py
+from app.orchestrator import classify_query, extract_serial_number
+
+class TestClassification:
+    def test_plain_serial(self):
+        assert classify_query('143960') == 'serial_number'
+    def test_hash_prefix(self):
+        assert classify_query('#91000') == 'serial_number'
+    def test_word_prefix(self):
+        assert classify_query('serial 45231') == 'serial_number'
+    def test_natural_language(self):
+        assert classify_query(
+            'tell me about the 1905 New Departure shipped to China'
+        ) == 'natural_language'
+    def test_model_name_only(self):
+        assert classify_query('New Departure') == 'natural_language'
+    def test_three_digits_not_serial(self):
+        assert classify_query('123') == 'natural_language'
+    def test_ten_digits_not_serial(self):
+        assert classify_query('1234567890') == 'natural_language'
+    def test_mixed_query_with_serial(self):
+        assert classify_query('serial 143960 nickel finish') == 'serial_number'
+    def test_extract_from_word_prefix(self):
+        assert extract_serial_number('serial 143960') == '143960'
+    def test_extract_from_bare(self):
+        assert extract_serial_number('143960') == '143960'
+
+Category 2 — Pydantic Schema Contracts (14 tests)
+Tests for request and response Pydantic models. No running server required — models instantiated directly. Updated for v1.1: ImageRef tested via backend model, record_url and cognitive_budget added, EXPOSE_INTERNAL_ERRORS default verified.
+
+Test inventory
+Test IDCategoryWhat it validatesSCH-01RequestValid QueryRequest with query only instantiates correctlySCH-02RequestQueryRequest with voice_id and top_k instantiates correctlySCH-03RequestQueryRequest rejects query under min lengthSCH-04RequestQueryRequest rejects query over 500 charactersSCH-05RequestQueryRequest rejects top_k over 20SCH-06ResponseQueryResponse with null year_end instantiates correctlySCH-07ResponseQueryResponse with empty image_refs instantiates correctlySCH-08ResponseBackend ImageRef Pydantic model accepts null captionSCH-09ResponseSourceMeta with null year_start and year_end instantiates correctlySCH-10ErrorApiError envelope matches expected shapeSCH-11record_urlQueryResponse accepts valid record_url stringSCH-12record_urlQueryResponse accepts null record_urlSCH-13SettingsEXPOSE_INTERNAL_ERRORS defaults to FalseSCH-14CognitiveBudgetCognitiveBudget Pydantic model instantiates with all required fields
+Implementation
+# tests/test_schema.py
+import pytest
+from pydantic import ValidationError
+from app.main import (QueryRequest, QueryResponse, SourceMeta,
+                      ApiError, CognitiveBudget)
+from app.main import ImageRef as BackendImageRef
+from app.settings import get_settings
+
+def make_source_meta(**kwargs):
+    defaults = dict(model='.32 New Departure', serial_range='143960',
+                    year_start=1905, year_end=None,
+                    record_count=1, confidence=1.0)
+    return SourceMeta(**{**defaults, **kwargs})
+
+def make_cost_estimate(**kwargs):
+    defaults = dict(embedding_tokens=8,
+        narration_input_tokens=312, narration_output_tokens=89,
+        tts_characters=387, collections_queried=1,
+        routing_decision='serial_number',
+        narration_model='claude-haiku-4-5-20251001',
+        embedding_cost_usd=0.00000016,
+        narration_cost_usd=0.00060560,
+        tts_cost_usd=0.00619200,
+        total_cost_usd=0.00679776,
+        daily_cost_at_10k_usd=67.9776,
+        pricing_date='2026-05-01')
+    return CognitiveBudget(**{**defaults, **kwargs})
+
+class TestQueryRequest:
+    def test_valid_query_only(self):
+        req = QueryRequest(query='143960')
+        assert req.query == '143960'
+        assert req.top_k == 5
+    def test_valid_with_all_fields(self):
+        req = QueryRequest(query='New Departure', voice_id='colby', top_k=10)
+        assert req.voice_id == 'colby'
+    def test_rejects_short_query(self):
+        with pytest.raises(ValidationError):
+            QueryRequest(query='x')
+    def test_rejects_long_query(self):
+        with pytest.raises(ValidationError):
+            QueryRequest(query='x' * 501)
+    def test_rejects_top_k_over_max(self):
+        with pytest.raises(ValidationError):
+            QueryRequest(query='143960', top_k=21)
+
+class TestQueryResponse:
+    def test_null_year_end(self):
+        resp = QueryResponse(narration_text='Test.', audio_b64='dGVzdA==',
+            audio_mime='audio/mpeg', image_count=0, image_refs=[],
+            source_meta=make_source_meta(), query_echo='143960',
+            latency_ms=1200, record_url=None,
+            cognitive_budget=make_cost_estimate())
+        assert resp.source_meta.year_end is None
+    def test_empty_image_refs(self):
+        resp = QueryResponse(narration_text='Test.', audio_b64='dGVzdA==',
+            audio_mime='audio/mpeg', image_count=0, image_refs=[],
+            source_meta=make_source_meta(year_start=None),
+            query_echo='test', latency_ms=100, record_url=None,
+            cognitive_budget=make_cost_estimate())
+        assert resp.image_refs == []
+    def test_backend_imageref_null_caption(self):
+        ref = BackendImageRef(image_id='abc123',
+            url='https://example.com/img.webp',
+            caption=None, primary=True)
+        assert ref.caption is None
+    def test_source_meta_all_null_years(self):
+        meta = make_source_meta(year_start=None, year_end=None)
+        assert meta.year_start is None
+        assert meta.year_end is None
+    def test_api_error_shape(self):
+        err = ApiError(ok=False, status=422,
+            error='no_records_found',
+            detail='No matching records.')
+        assert err.ok is False
+    def test_record_url_valid(self):
+        resp = QueryResponse(narration_text='Test.', audio_b64='dGVzdA==',
+            audio_mime='audio/mpeg', image_count=0, image_refs=[],
+            source_meta=make_source_meta(), query_echo='test',
+            latency_ms=100,
+            record_url='https://theabiquacollection.com/f/fbGhMSuH',
+            cognitive_budget=make_cost_estimate())
+        assert resp.record_url == 'https://theabiquacollection.com/f/fbGhMSuH'
+    def test_record_url_null(self):
+        resp = QueryResponse(narration_text='Test.', audio_b64='dGVzdA==',
+            audio_mime='audio/mpeg', image_count=0, image_refs=[],
+            source_meta=make_source_meta(), query_echo='test',
+            latency_ms=100, record_url=None,
+            cognitive_budget=make_cost_estimate())
+        assert resp.record_url is None
+    def test_expose_internal_errors_default(self):
+        settings = get_settings()
+        assert settings.EXPOSE_INTERNAL_ERRORS is False
+    def test_cognitive_budget_model(self):
+        budget = make_cost_estimate()
+        assert budget.routing_decision == 'serial_number'
+        assert budget.collections_queried == 1
+        assert budget.total_cost_usd > 0
+
+Category 3 — Rime Integration (13 tests)
+All tests mock urllib HTTP calls. No live Rime API calls. Updated for v1.1 with RIME-13 added to protect URL preservation in _clean_narration().
+
+Test inventory
+Test IDCategoryWhat it validatesRIME-01Successsynthesize() returns RimeResult with valid base64 on 200RIME-02Successaudio_b64 round-trips through base64 correctlyRIME-03Successsynthesize() uses DEFAULT_VOICE when speaker is NoneRIME-04Successsynthesize() uses provided speaker when passed explicitlyRIME-05Text prep_clean_narration() strips markdown underscore formattingRIME-06Text prep_clean_narration() strips markdown bold asterisksRIME-07Text prep_clean_narration() strips markdown links leaving display textRIME-08Error mappingHTTPError 401 raises RuntimeError with rime_api_error:401 prefixRIME-09Error mappingHTTPError 429 raises RuntimeError with rime_api_error:429 prefixRIME-10Error mappingURLError raises RuntimeError with rime_unreachable prefixRIME-11Voicesget_voices() returns parsed voice list on 200RIME-12Voicesget_voices() raises RuntimeError on network failureRIME-13Text prep_clean_narration() preserves bare URLs intact
+Implementation
+# tests/test_rime.py
+import base64, json, pytest
+from unittest.mock import patch, MagicMock
+from urllib.error import HTTPError, URLError
+from app.rime import synthesize, get_voices, _clean_narration, RimeResult
+
+FAKE_MP3 = b'\xff\xfb\x90\x00' + b'\x00' * 100
+FAKE_MP3_B64 = base64.b64encode(FAKE_MP3).decode('utf-8')
+
+def make_mock_response(body: bytes):
+    mock = MagicMock()
+    mock.read.return_value = body
+    mock.__enter__ = lambda s: s
+    mock.__exit__ = MagicMock(return_value=False)
+    return mock
+
+class TestSynthesize:
+    @pytest.mark.asyncio
+    async def test_returns_rime_result(self):
+        with patch('urllib.request.urlopen',
+                   return_value=make_mock_response(FAKE_MP3)):
+            result = await synthesize('The New Departure was produced in 1887.')
+        assert isinstance(result, RimeResult)
+        assert result.audio_mime == 'audio/mpeg'
+    @pytest.mark.asyncio
+    async def test_audio_b64_round_trips(self):
+        with patch('urllib.request.urlopen',
+                   return_value=make_mock_response(FAKE_MP3)):
+            result = await synthesize('Test.')
+        assert base64.b64decode(result.audio_b64) == FAKE_MP3
+    @pytest.mark.asyncio
+    async def test_uses_default_voice(self):
+        with patch('urllib.request.urlopen',
+                   return_value=make_mock_response(FAKE_MP3)):
+            result = await synthesize('Test.', speaker=None)
+        assert result.speaker == 'colby'
+    @pytest.mark.asyncio
+    async def test_uses_provided_speaker(self):
+        with patch('urllib.request.urlopen',
+                   return_value=make_mock_response(FAKE_MP3)):
+            result = await synthesize('Test.', speaker='grove')
+        assert result.speaker == 'grove'
+    @pytest.mark.asyncio
+    async def test_401_raises_api_error(self):
+        err = HTTPError('', 401, 'Unauthorized', None, MagicMock())
+        err.read = lambda: b'{"error": "invalid_api_key"}'
+        with patch('urllib.request.urlopen', side_effect=err):
+            with pytest.raises(RuntimeError) as exc:
+                await synthesize('Test.')
+        assert 'rime_api_error:401' in str(exc.value)
+    @pytest.mark.asyncio
+    async def test_429_raises_api_error(self):
+        err = HTTPError('', 429, 'Too Many Requests', None, MagicMock())
+        err.read = lambda: b'{"error": "rate_limit"}'
+        with patch('urllib.request.urlopen', side_effect=err):
+            with pytest.raises(RuntimeError) as exc:
+                await synthesize('Test.')
+        assert 'rime_api_error:429' in str(exc.value)
+    @pytest.mark.asyncio
+    async def test_url_error_raises_unreachable(self):
+        with patch('urllib.request.urlopen',
+                   side_effect=URLError('Connection refused')):
+            with pytest.raises(RuntimeError) as exc:
+                await synthesize('Test.')
+        assert 'rime_unreachable' in str(exc.value)
+
+class TestCleanNarration:
+    def test_strips_underscores(self):
+        result = _clean_narration('_Shipped_ in 1905.')
+        assert '_' not in result
+        assert 'Shipped' in result
+    def test_strips_bold_asterisks(self):
+        result = _clean_narration('**factory letter** on file.')
+        assert '*' not in result
+        assert 'factory letter' in result
+    def test_strips_markdown_links(self):
+        result = _clean_narration('[view record](https://example.com)')
+        assert 'view record' in result
+        assert 'https://example.com' not in result
+    def test_preserves_bare_urls(self):
+        url = 'https://theabiquacollection.com/f/fbGhMSuH'
+        result = _clean_narration(f'View at {url}')
+        assert url in result
+
+class TestGetVoices:
+    @pytest.mark.asyncio
+    async def test_returns_voice_list(self):
+        fake = [{'id': 'colby', 'name': 'Colby', 'preview_url': None}]
+        mock_resp = make_mock_response(json.dumps(fake).encode())
+        with patch('urllib.request.urlopen', return_value=mock_resp):
+            result = await get_voices()
+        assert result == {'voices': fake}
+    @pytest.mark.asyncio
+    async def test_raises_on_network_failure(self):
+        with patch('urllib.request.urlopen',
+                   side_effect=URLError('Name resolution failed')):
+            with pytest.raises(RuntimeError):
+                await get_voices()
+
+Category 4 — Cognitive Budget Cost Calculation (7 tests)
+Tests for pipeline_cost.py. Pure unit tests — no external dependencies. Validates that pricing constants produce correct USD values and that mathematical relationships between fields are consistent.
+
+Design noteThese tests pin the pricing math, not the specific dollar amounts. If Anthropic or Rime update pricing, the PRICING constants in pipeline_cost.py are updated, the tests are updated to match, and the change is recorded in CHANGELOG. The tests exist to catch accidental changes to the math, not to assert that specific pricing is correct.
+Test inventory
+Test IDCategoryWhat it validatesCOST-01CalculationZero token inputs produce zero costsCOST-02CalculationEmbedding cost = tokens * embedding_per_token constantCOST-03CalculationNarration cost = (input * haiku_input_rate) + (output * haiku_output_rate)COST-04CalculationTTS cost = characters * rime_per_char constantCOST-05Calculationtotal_cost_usd = embedding + narration + tts (within float tolerance)COST-06Calculationdaily_cost_at_10k_usd = total_cost_usd * 10000 (within float tolerance)COST-07DataclassCostEstimate routing_decision and narration_model fields are preserved
+Implementation
+# tests/test_cost.py
+import pytest
+from app.pipeline_cost import calculate_cost, PRICING
+
+class TestCostCalculation:
+
+    def test_zero_inputs_produce_zero_costs(self):
+        result = calculate_cost(
+            embedding_tokens=0,
+            narration_input_tokens=0,
+            narration_output_tokens=0,
+            tts_characters=0,
+            collections_queried=1,
+            routing_decision='serial_number',
+            narration_model='claude-haiku-4-5-20251001',
+        )
+        assert result.embedding_cost_usd == 0.0
+        assert result.narration_cost_usd == 0.0
+        assert result.tts_cost_usd == 0.0
+        assert result.total_cost_usd == 0.0
+        assert result.daily_cost_at_10k_usd == 0.0
+
+    def test_embedding_cost_matches_constant(self):
+        tokens = 100
+        result = calculate_cost(
+            embedding_tokens=tokens,
+            narration_input_tokens=0, narration_output_tokens=0,
+            tts_characters=0, collections_queried=1,
+            routing_decision='serial_number',
+            narration_model='claude-haiku-4-5-20251001',
+        )
+        expected = round(tokens * PRICING['embedding_per_token'], 8)
+        assert result.embedding_cost_usd == expected
+
+    def test_narration_cost_matches_constants(self):
+        result = calculate_cost(
+            embedding_tokens=0,
+            narration_input_tokens=300,
+            narration_output_tokens=90,
+            tts_characters=0, collections_queried=1,
+            routing_decision='serial_number',
+            narration_model='claude-haiku-4-5-20251001',
+        )
+        expected = round(
+            300 * PRICING['haiku_input_per_token'] +
+            90  * PRICING['haiku_output_per_token'], 8
+        )
+        assert result.narration_cost_usd == expected
+
+    def test_tts_cost_matches_constant(self):
+        chars = 387
+        result = calculate_cost(
+            embedding_tokens=0,
+            narration_input_tokens=0, narration_output_tokens=0,
+            tts_characters=chars, collections_queried=1,
+            routing_decision='serial_number',
+            narration_model='claude-haiku-4-5-20251001',
+        )
+        expected = round(chars * PRICING['rime_per_char'], 8)
+        assert result.tts_cost_usd == expected
+
+    def test_total_equals_sum_of_parts(self):
+        result = calculate_cost(
+            embedding_tokens=50,
+            narration_input_tokens=300,
+            narration_output_tokens=90,
+            tts_characters=387, collections_queried=1,
+            routing_decision='natural_language',
+            narration_model='claude-haiku-4-5-20251001',
+        )
+        expected_total = round(
+            result.embedding_cost_usd +
+            result.narration_cost_usd +
+            result.tts_cost_usd, 8
+        )
+        assert abs(result.total_cost_usd - expected_total) < 1e-9
+
+    def test_daily_extrapolation(self):
+        result = calculate_cost(
+            embedding_tokens=50,
+            narration_input_tokens=300,
+            narration_output_tokens=90,
+            tts_characters=387, collections_queried=3,
+            routing_decision='natural_language',
+            narration_model='claude-haiku-4-5-20251001',
+        )
+        expected_daily = round(result.total_cost_usd * 10000, 4)
+        assert abs(result.daily_cost_at_10k_usd - expected_daily) < 1e-6
+
+    def test_metadata_fields_preserved(self):
+        result = calculate_cost(
+            embedding_tokens=8,
+            narration_input_tokens=312,
+            narration_output_tokens=89,
+            tts_characters=387,
+            collections_queried=1,
+            routing_decision='serial_number',
+            narration_model='claude-haiku-4-5-20251001',
+        )
+        assert result.routing_decision == 'serial_number'
+        assert result.narration_model == 'claude-haiku-4-5-20251001'
+        assert result.collections_queried == 1
+        assert result.pricing_date == '2026-05-01'
+
+README Callout
+Update the Tests section in README.md to reflect the current four-category suite:
+
+## Tests
+
+The suite covers four high-impact areas without live API calls:
+
+| Category | File | Tests | What it validates |
+|---|---|---|---|
+| Query classification | test_classification.py | 10 | Serial vs. natural language routing |
+| Schema contracts | test_schema.py | 14 | Request validation, response envelope, Cognitive Budget model |
+| Rime integration | test_rime.py | 13 | Audio synthesis, error mapping, text prep |
+| Cognitive Budget | test_cost.py | 7 | Cost calculation correctness and math consistency |
+
+```bash
+uv run pytest -v
+```
+
+End-to-end tests against live Atlas and Rime APIs are excluded from
+CI. The full pipeline is validated manually using the demo query.
+
+Cursor Prompt
+When handing this spec to Cursor alongside the minor PR fixes, use the following structure — the fixes and the spec implementation go in one prompt, fixes first:
+
+Fix two minor code review findings, then implement the test suite
+from Spec 06 v1.1. Address in order.
+
+FIX 1 — narration_model hardcoding in main.py
+The narration_model string passed to calculate_cost() is a
+separate hardcoded literal from the one in orchestrator.py.
+A future model upgrade would produce silently mis-priced estimates.
+
+Add NARRATION_MODEL as a constant in orchestrator.py where the
+Anthropic call is made, e.g.:
+  NARRATION_MODEL = 'claude-haiku-4-5-20251001'
+
+Pass it through OrchestratorResult as a new field:
+  narration_model: str
+
+Use it in main.py when calling calculate_cost():
+  narration_model=orch_result.narration_model
+
+This ensures the model name is always consistent between
+the orchestrator and the cost calculation.
+
+FIX 2 — /voices cache hit/miss logging
+The /voices log line no longer distinguishes cache hits from
+misses. Restore observability in get_cached_voices():
+
+  async def get_cached_voices() -> dict:
+      async with _voices_lock:
+          if <cache is valid>:
+              pipeline_log('voices', 'cache_hit')
+              return _voices_cache
+          pipeline_log('voices', 'cache_miss — fetching from Rime')
+          result = await get_voices()
+          ...
+
+Use the existing pipeline_log utility — gated on PIPELINE_DEBUG
+so it only fires when debug logging is enabled.
+
+Then implement Spec 06 v1.1 [paste spec here]
+
+Production Callouts
+CI pipelineThe test suite runs in under 10 seconds with no external dependencies. Add .github/workflows/test.yml running uv run pytest on every push to main. test_smoke.py skips gracefully in keyless CI environments.
+Cost accuracyPricing constants in pipeline_cost.py are approximate and dated. For production billing accuracy, fetch current pricing from each provider's API or a maintained pricing database rather than hardcoded constants. The PRICING_DATE field in every response makes staleness visible.
+Property-based testingUse Hypothesis to generate edge cases for classify_query() automatically. Particularly valuable for the serial number regex — Hypothesis finds boundary cases that hand-written tests miss.
+Component Dependencies
+• FastAPI Routes Spec — QueryRequest, QueryResponse, CognitiveBudget, ApiError models
+• LlamaIndex Orchestrator Spec v1.1 — classify_query(), extract_serial_number(), OrchestratorResult.narration_model
+• Rime TTS Integration Spec — synthesize(), get_voices(), _clean_narration(), RimeResult
+• pipeline_cost.py — calculate_cost(), PRICING constants, CostEstimate dataclass
+
+The Abiqua Collection Voice RAG System  ·  Test Suite Spec v1.1  ·  Draft

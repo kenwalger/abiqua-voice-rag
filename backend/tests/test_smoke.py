@@ -11,15 +11,13 @@ REQUIRED_ENV_VARS = [
     "OPENAI_API_KEY",
 ]
 
-missing = [v for v in REQUIRED_ENV_VARS if not os.environ.get(v)]
-if missing:
-    pytest.skip(
-        f"Smoke test requires env vars: {', '.join(missing)}",
-        allow_module_level=True,
-    )
-
 
 def test_fastapi_app_metadata() -> None:
+    missing = [v for v in REQUIRED_ENV_VARS if not os.environ.get(v)]
+    if missing:
+        pytest.skip(
+            f"Smoke test requires env vars: {', '.join(missing)}",
+        )
     from app.main import app
 
     assert app.title

@@ -444,12 +444,27 @@ RIME_BASE_URL=https://users.rime.ai
 
 ## Tests
 
+The suite covers four high-impact areas without live API calls:
+
+| Category | File | Tests | What it validates |
+| --- | --- | --- | --- |
+| Query classification | `test_classification.py` | 12 | Serial vs. natural language routing |
+| Schema contracts | `test_schema.py` | 14 | Request validation, response envelope, Cognitive Budget model |
+| Rime integration | `test_rime.py` | 13 | Audio synthesis, error mapping, text prep |
+| Cognitive Budget | `test_cost.py` | 7 | Cost calculation correctness and math consistency |
+
 From the `backend/` directory (uses the uv-managed virtualenv):
 
 ```bash
 uv sync
 uv run pytest -v
 ```
+
+Pytest is configured under `[tool.pytest.ini_options]` in
+`backend/pyproject.toml`: `asyncio_mode = "auto"` for native `async def`
+tests, and `addopts = "-p asyncio"` so the asyncio plugin still loads when
+plugin autoload is turned off (see below). There is no separate
+`backend/pytest.ini`.
 
 If a globally installed `pytest` pulls incompatible plugins on your machine,
 run with plugin autoload disabled:
@@ -458,6 +473,32 @@ run with plugin autoload disabled:
 # PowerShell
 $env:PYTEST_DISABLE_PLUGIN_AUTOLOAD='1'; uv run pytest -v
 ```
+
+End-to-end tests against live Atlas and Rime APIs are excluded from CI. The
+full pipeline is validated manually using the demo query.
+
+Latest local verification snapshot:
+- `uv run pytest tests/test_classification.py -v` -> 12 passed
+- `uv run pytest -v` -> 46 passed, 1 skipped
+- `backend/pyproject.toml` ends with newline byte `0a`
+
+---
+
+## Troubleshooting
+
+**PowerShell JSON quoting**
+On Windows PowerShell, the curl -d flag mangles single-quoted JSON.
+Use a variable or file instead:
+
+```powershell
+$body = '{"query": "143960"}'
+curl -X POST http://localhost:8000/query `
+  -H "Content-Type: application/json" `
+  -d $body
+```
+
+Or save the body to a file and use --data-binary "@body.json".
+
 
 ---
 
@@ -475,9 +516,9 @@ This is a demo build. Every shortcut has a documented upgrade path:
 | No caching           | Redis, SHA-256 keyed by query + voice_id   |
 | urllib HTTP client   | httpx.AsyncClient with retry and backoff   |
 | Single collection    | Multi-collection LlamaIndex retrieval      |
+| Hardcoded pricing constants | Live pricing from provider APIs, `PRICING_DATE` makes staleness visible |
 
-
-Full rationale for each decision is in the spec documents under `/docs/specs/`.
+Full rationale for each decision is in the spec documents under `/docs/specs/` and the [Architecture Diagrams](ARCHITECTURE.md).
 
 ---
 

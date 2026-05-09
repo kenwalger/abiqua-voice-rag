@@ -25,7 +25,10 @@ settings = get_settings()
 os.environ.setdefault("MONGODB_URI", settings.MONGODB_URI)
 
 SCORE_THRESHOLD = settings.SCORE_THRESHOLD
+NARRATION_MODEL = "claude-haiku-4-5-20251001"
 SERIAL_PATTERN = re.compile(r"^\s*(?:#|serial\s*)?(\d{4,9})\s*$", re.IGNORECASE)
+_SERIAL_IN_MIXED = re.compile(r"(?i)\bserial\s+(\d{4,9})\b")
+_HASH_SERIAL_IN_MIXED = re.compile(r"(?i)#(\d{4,9})\b")
 
 SYSTEM_PROMPT = """
 You are the voice of The Abiqua Collection, a digital museum
@@ -60,6 +63,7 @@ class OrchestratorResult:
     embedding_tokens: int
     narration_input_tokens: int
     narration_output_tokens: int
+    narration_model: str
 
 
 mongo_client = MongoClient(
@@ -128,16 +132,28 @@ def initialize_retrievers() -> None:
 
 
 def classify_query(query: str) -> str:
-    if SERIAL_PATTERN.match(query):
+    q = query.strip()
+    if SERIAL_PATTERN.match(q):
+        return "serial_number"
+    if _SERIAL_IN_MIXED.search(q):
+        return "serial_number"
+    if _HASH_SERIAL_IN_MIXED.search(q):
         return "serial_number"
     return "natural_language"
 
 
 def extract_serial_number(query: str) -> str | None:
-    match = SERIAL_PATTERN.match(query)
-    if not match:
-        return None
-    return match.group(1)
+    q = query.strip()
+    match = SERIAL_PATTERN.match(q)
+    if match:
+        return match.group(1)
+    m = _SERIAL_IN_MIXED.search(q)
+    if m:
+        return m.group(1)
+    m = _HASH_SERIAL_IN_MIXED.search(q)
+    if m:
+        return m.group(1)
+    return None
 
 
 async def embed_query(query: str) -> list[float]:
@@ -435,7 +451,7 @@ def build_user_prompt(
 async def synthesize_narration(user_prompt: str) -> tuple[str, int, int]:
     response = await asyncio.to_thread(
         anthropic_client.messages.create,
-        model="claude-haiku-4-5-20251001",
+        model=NARRATION_MODEL,
         max_tokens=400,
         temperature=0.3,
         system=SYSTEM_PROMPT,
@@ -578,4 +594,5 @@ async def run_query(query: str, top_k: int) -> OrchestratorResult:
         embedding_tokens=embedding_tokens,
         narration_input_tokens=narration_input_tokens,
         narration_output_tokens=narration_output_tokens,
+        narration_model=NARRATION_MODEL,
     )

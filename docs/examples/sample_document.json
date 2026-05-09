@@ -1,1 +1,59 @@
-{}
+{
+    "_comment": "Sample document showing the firearms collection schema. Sensitive values are redacted or zeroed. Fields marked [RAG] are used by the Voice RAG retrieval pipeline. Fields marked [OPS] are operational and excluded from retrieval context.",
+    "_id": {
+      "$oid": "6"
+    },
+    "manufacturer": "Smith & Wesson",
+    "model": ".32 New Departure",
+    "series": "1st Model",
+    "serial_number": "13325",
+    "type": "revolver",
+    "sku": "sw-32sh-13325",
+    "year": 1890,
+    "estimated_year": false,
+    "caliber": ".32 S&W",
+    "antique": true,
+    "curio": true,
+    "barrel_length": 3,
+    "grips": "black hard rubber",
+    "finish": "nickel",
+    "factory_letter": true,
+    "notes": "Example provenance note. Shipped to a dealer in [City], [State] on [date]. Verified by [name] on [date].",
+    "box": false,
+    "images": [
+      "13325-0.webp",
+      "13325-1.webp",
+      "13325-2.webp",
+      "13325-3.webp",
+      "13325-4.webp",
+      "13325-5.webp"
+    ],
+    "created_at": "2025-04-06T19:56:27.185351+00:00",
+    "slug": "smith-wesson-32-safety-hammerless-3inch-nickel-1890-32-s-w-13",
+    "short_code": "",
+    "short_url": "",
+    "display_card_printed": true,
+    "sku_card_printed": true,
+    "engraved": false,
+    "appraised_value": {
+      "amount": 0,
+      "currency": "USD"
+    },
+    "date_acquired": {
+      "$date": "2020-01-01T00:00:00.000Z"
+    },
+    "nra_rating": "",
+    "price_paid": {
+      "amount": 0,
+      "currency": "USD"
+    },
+    "box_sticker_printed": true,
+    "qr_code_base64": "",
+    "updated_at": "2025-05-06T21:44:56.997172+00:00",
+    "embedding": [
+
+    ],
+    "embedding_updated_at": {
+      "$date": "2025-05-20T18:03:53.915Z"
+    }
+  }
