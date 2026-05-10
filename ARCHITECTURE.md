@@ -214,7 +214,7 @@ flowchart LR
     D6 -->|replace HTTP client| P6
     D7 -->|switch modelId| P7
     D8 -->|fetch live pricing| P8
-    D9 -->|eiden pattern| P9
+    D9 -->|widen pattern| P9
 
     style Demo fill:#1c1917,stroke:#78716c,color:#e7e5e4
     style Production fill:#0f172a,stroke:#334155,color:#e2e8f0
