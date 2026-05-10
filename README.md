@@ -524,6 +524,7 @@ This is a demo build. Every shortcut has a documented upgrade path:
 | urllib HTTP client   | httpx.AsyncClient with retry and backoff   |
 | Single collection    | Multi-collection LlamaIndex retrieval      |
 | Hardcoded pricing constants | Live pricing from provider APIs, `PRICING_DATE` makes staleness visible |
+| Serial number pattern (4-9 digits only) | Configurable regex supportin 1-X digits with optional alphanumeric support. |
 
 Full rationale for each decision is in the spec documents under `/docs/specs/` and the [Architecture Diagrams](ARCHITECTURE.md).
 

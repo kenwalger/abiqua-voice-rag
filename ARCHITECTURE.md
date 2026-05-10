@@ -191,6 +191,7 @@ flowchart LR
         D6[urllib.request\nin run_in_executor]
         D7[arcana model\nfull synthesis latency]
         D8[Hardcoded pricing constants\ndated PRICING_DATE field]
+        D9[Serial Pattern: 4-9 digits only]
     end
 
     subgraph Production ["Production Upgrade Path"]
@@ -202,6 +203,7 @@ flowchart LR
         P6[httpx.AsyncClient\nconnection pooling + retry]
         P7[mistv3 model\n~70ms time-to-first-audio]
         P8[Live pricing from provider APIs\nor maintained pricing database\nPRICING_DATE makes staleness visible]
+        P9[Configuration regex\n1-X digits with alpha numeric support]
     end
 
     D1 -->|enable streaming| P1
@@ -212,6 +214,7 @@ flowchart LR
     D6 -->|replace HTTP client| P6
     D7 -->|switch modelId| P7
     D8 -->|fetch live pricing| P8
+    D9 -->|eiden pattern| P9
 
     style Demo fill:#1c1917,stroke:#78716c,color:#e7e5e4
     style Production fill:#0f172a,stroke:#334155,color:#e2e8f0
